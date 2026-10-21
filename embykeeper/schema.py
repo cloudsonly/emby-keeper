@@ -154,6 +154,7 @@ class EmbyAccount(ConfigModel):
     cf_challenge: Optional[bool] = True
     use_proxy: Optional[bool] = True
     timeout: Optional[int] = None
+    verify: Optional[bool] = None
     play_id: Optional[str] = None
     enabled: Optional[bool] = True
 
@@ -175,6 +176,8 @@ class EmbyConfig(MediaServerBaseConfig):
     random_delay_range: List[int] = Field(
         default_factory=lambda: [180, 360], min_length=2, max_length=2
     )
+    # 是否校验 TLS 证书; 默认关闭以兼容自签名证书的自建 / 反代站点
+    verify: Optional[bool] = False
     account: Optional[List[EmbyAccount]] = []
 
     @model_validator(mode="after")

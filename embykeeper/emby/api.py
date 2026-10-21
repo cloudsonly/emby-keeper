@@ -99,6 +99,18 @@ class Emby:
     def use_stream_cdn_path(self):
         return bool(self.a.stream_cdn_path)
 
+    @property
+    def verify_ssl(self) -> bool:
+        """是否校验服务端 TLS 证书.
+
+        默认关闭, 以兼容自签名证书的自建 / 反代站点 (上游行为).
+        账号级配置优先于全局配置.
+        """
+        account_value = getattr(self.a, "verify", None)
+        if account_value is not None:
+            return bool(account_value)
+        return bool(getattr(config.emby, "verify", False))
+
     @staticmethod
     def _describe_response(resp: Response, limit: int = 200) -> str:
         try:
@@ -273,7 +285,7 @@ class Emby:
         timeout = self.a.timeout or config.emby.timeout or 10
 
         return AsyncSession(
-            verify=False,
+            verify=self.verify_ssl,
             headers=self.build_headers(),
             cookies=cookies,
             proxy=get_proxy_str(self.proxy, curl=True),
@@ -772,7 +784,7 @@ class Emby:
                 client = None
                 try:
                     client = httpx.AsyncClient(
-                        verify=False,
+                        verify=self.verify_ssl,
                         timeout=self._get_stream_timeout(),
                         follow_redirects=False,
                         http2=False,
@@ -802,7 +814,7 @@ class Emby:
                             redirect_headers = self._build_external_stream_headers(length)
 
                         client = httpx.AsyncClient(
-                            verify=False,
+                            verify=self.verify_ssl,
                             timeout=self._get_stream_timeout(),
                             follow_redirects=False,
                             http2=False,

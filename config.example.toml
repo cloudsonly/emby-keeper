@@ -27,6 +27,9 @@ random_delay_range = [180, 360]
 # 每个 Emby 请求的超时时间 (秒), 对慢站点可适当调大:
 timeout = 10
 
+# 是否校验服务端 TLS 证书. 默认 false 以兼容自签名证书的自建 / 反代站点:
+verify = false
+
 # ================================================================================
 # Emby 账号, 您可以重复该片段多次以增加多个账号.
 # 详见: https://emby-keeper.github.io/guide/配置文件#emby-account-子项
@@ -66,6 +69,9 @@ time = [300, 600]
 
 # 进度上报连续失败时降级为只发送结束事件, 而不是判定保活失败:
 # progress_fallback = true
+
+# 该账号是否校验 TLS 证书, 默认使用全局设置 emby.verify:
+# verify = false
 
 # 无法获取视频长度时, 依然允许播放 (默认最大播放 10 分钟左右, 可能播放超出实际长度):
 # allow_stream = true

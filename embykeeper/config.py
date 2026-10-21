@@ -188,6 +188,9 @@ class ConfigManager(ProxyBase):
         c.add(comment("每个 Emby 请求的超时时间 (秒), 对慢站点可适当调大:"))
         c["timeout"] = default_config.emby.timeout
         c.add(nl())
+        c.add(comment("是否校验服务端 TLS 证书, 默认 false 以兼容自签名证书的自建 / 反代站点:"))
+        c["verify"] = default_config.emby.verify
+        c.add(nl())
         c.add(comment("=" * 80))
         c.add(comment("Emby 账号, 您可以重复该片段多次以增加多个账号."))
         c.add(comment(f"详见: https://emby-keeper.github.io/guide/配置文件#emby-account-子项"))
