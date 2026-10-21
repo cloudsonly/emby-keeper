@@ -11,6 +11,20 @@
 
 ---
 
+> **本仓库是一个合并版 fork（v7.7.0）**
+>
+> 基于 [`aprpure/emby-keeper`](https://github.com/aprpure/emby-keeper)（本地 LLM 替代云端认证、`skip_auth`），
+> 融合 [`supermoon0201/emby-keeper`](https://github.com/supermoon0201/emby-keeper) 的 Emby 保活改造（自建 / 反代 / CDN 站点适配）、
+> [`Elykia093/emby-keeper`](https://github.com/Elykia093/emby-keeper) 的网页签到器（結束バンド）、
+> 以及 [`ignimutos/emby-keeper`](https://github.com/ignimutos/emby-keeper) 的真 bug 修复。
+>
+> **改动清单、配置示例与已知限制见 [FORK.md](FORK.md)。**
+>
+> 本仓库**不发布到 PyPI / Docker Hub**，请自行构建镜像或源码安装。
+> 下方文档中的安装命令与镜像地址均指向上游，直接使用会安装到原版。
+
+---
+
 ## 功能
 
 Embykeeper 是一个 Emby 影视服务器签到保号的自动执行工具, 它主要提供两大核心功能:

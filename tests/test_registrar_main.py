@@ -195,11 +195,12 @@ BaseBotRegister = base_module.BaseBotRegister
 
 
 class FakeRegistrarConfig:
-    def __init__(self, site_configs=None, retries=None, timeout=None, concurrency=1):
+    def __init__(self, site_configs=None, retries=None, timeout=None, concurrency=1, enabled=True):
         self._site_configs = site_configs or {}
         self.retries = retries
         self.timeout = timeout
         self.concurrency = concurrency
+        self.enabled = enabled
 
     def get_site_config(self, site_name):
         return self._site_configs.get(site_name, {})

@@ -1,6 +1,7 @@
 from typing import List, Optional, Union, Dict, Any, ClassVar
-from pydantic import BaseModel, Field, model_validator, ValidationError
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator, ValidationError
 from pydantic.networks import HttpUrl
+from pydantic_core import core_schema
 
 DEFAULT_TIME_RANGE = "<11:00AM,11:00PM>"
 DEFAULT_EMBY_INTERVAL_DAYS = "<7,12>"
@@ -27,11 +28,12 @@ class ConfigModel(BaseModel):
 
 class UseStr(str):
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler):
+        # pydantic v2 起 __get_validators__ 已废弃 (v3 将移除), 改用 core schema.
+        return core_schema.no_info_before_validator_function(cls.validate, handler(str))
 
     @classmethod
-    def validate(cls, v, info):
+    def validate(cls, v):
         if isinstance(v, (int, float)):
             return str(v)
         return v
@@ -39,14 +41,16 @@ class UseStr(str):
 
 class UseHttpUrl(HttpUrl):
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler):
+        return core_schema.no_info_before_validator_function(
+            cls.validate, handler.generate_schema(HttpUrl)
+        )
 
     @classmethod
-    def validate(cls, v, info):
+    def validate(cls, v):
         if isinstance(v, str) and not v.startswith(("http://", "https://")):
             v = f"https://{v}"
-        return HttpUrl(v)
+        return v
 
     def __str__(self):
         return str(self._url)
@@ -126,6 +130,7 @@ class MediaServerBaseConfig(ConfigModel):
     interval_days: Optional[UseStr] = DEFAULT_EMBY_INTERVAL_DAYS
     concurrency: Optional[int] = 1
     retries: Optional[int] = 5
+    timeout: Optional[int] = 10
 
 
 class EmbyAccount(ConfigModel):
@@ -142,8 +147,13 @@ class EmbyAccount(ConfigModel):
     device_id: Optional[str] = None
     allow_multiple: Optional[bool] = True
     allow_stream: Optional[bool] = False
+    stream_workaround: Optional[bool] = False
+    external_stream_workaround: Optional[bool] = False
+    stream_cdn_path: Optional[bool] = False
+    progress_fallback: Optional[bool] = False
     cf_challenge: Optional[bool] = True
     use_proxy: Optional[bool] = True
+    timeout: Optional[int] = None
     play_id: Optional[str] = None
     enabled: Optional[bool] = True
 
@@ -161,7 +171,21 @@ class EmbyAccount(ConfigModel):
 
 
 class EmbyConfig(MediaServerBaseConfig):
+    random_delay: Optional[bool] = True
+    random_delay_range: List[int] = Field(
+        default_factory=lambda: [180, 360], min_length=2, max_length=2
+    )
     account: Optional[List[EmbyAccount]] = []
+
+    @model_validator(mode="after")
+    def validate_random_delay_range(self):
+        """校验播放前随机等待时间范围。"""
+        start, end = self.random_delay_range
+        if start < 0 or end < 0:
+            raise ValueError("random_delay_range 中的等待时间不能小于 0")
+        if start > end:
+            raise ValueError("random_delay_range 的起始时间不能大于结束时间")
+        return self
 
 
 class SubsonicAccount(ConfigModel):
@@ -251,6 +275,10 @@ class LLMConfig(ConfigModel):
     helper_command: Optional[str] = None
     helper_timeout: Optional[int] = 120
     auth_services: Optional[List[str]] = None
+    # 无条件跳过各站点的 additional_auth 检查 (prime/super/captcha/ocr/pornemby_pack).
+    # 仅影响"认证前置检查"这一关; 后续真正需要验证码令牌时仍会走 helper,
+    # 未配置 helper 的 captcha 类站点会在运行中失败而非在初始化时被忽略.
+    skip_additional_auth: Optional[bool] = False
 
 
 class TurnstileConfig(ConfigModel):

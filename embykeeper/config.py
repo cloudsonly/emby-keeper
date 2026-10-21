@@ -179,6 +179,15 @@ class ConfigManager(ProxyBase):
         c.add(comment("最大可同时进行的站点数:"))
         c["concurrency"] = default_config.emby.concurrency
         c.add(nl())
+        c.add(comment("是否在播放前随机等待, 设为 false 可立即开始播放:"))
+        c["random_delay"] = default_config.emby.random_delay
+        c.add(nl())
+        c.add(comment("播放前随机等待的时间范围 (秒), 仅 random_delay = true 时生效:"))
+        c["random_delay_range"] = default_config.emby.random_delay_range
+        c.add(nl())
+        c.add(comment("每个 Emby 请求的超时时间 (秒), 对慢站点可适当调大:"))
+        c["timeout"] = default_config.emby.timeout
+        c.add(nl())
         c.add(comment("=" * 80))
         c.add(comment("Emby 账号, 您可以重复该片段多次以增加多个账号."))
         c.add(comment(f"详见: https://emby-keeper.github.io/guide/配置文件#emby-account-子项"))
@@ -203,6 +212,8 @@ class ConfigManager(ProxyBase):
         a.add(comment(item({"interval_days": default_config.emby.interval_days}).as_string()))
         a.add(comment("每次进行保活的当日时间范围, 默认使用全局设置 emby.time_range:"))
         a.add(comment(item({"time_range": default_config.emby.time_range}).as_string()))
+        a.add(comment("该账号的请求超时时间 (秒), 默认使用全局设置 emby.timeout:"))
+        a.add(comment(item({"timeout": default_config.emby.timeout}).as_string()))
         a.add(comment("无法获取视频长度时, 依然允许播放 (默认最大播放 10 分钟左右, 可能播放超出实际长度):"))
         a.add(comment(item({"allow_stream": True}).as_string()))
         a.add(comment("取消注释以不使用配置文件定义的代理进行连接"))
@@ -230,6 +241,23 @@ class ConfigManager(ProxyBase):
             doc.add(comment(line))
 
         doc.add(nl())
+        doc.add(comment("=" * 80))
+        doc.add(comment("本地 LLM 替代原作者云端认证 (可选, 与 skip_auth 配合使用)"))
+        doc.add(comment("未配置本段时, 程序行为与上游一致, 全部走 @embykeeper_auth_bot"))
+        doc.add(comment("详见: docs/guide/LLM-本地替代.md"))
+        doc.add(comment("=" * 80))
+        doc.add(comment("[llm]"))
+        doc.add(comment('mode = "auto"  # auto: 优先本地失败回退 / local: 只走本地 / remote: 只走远端'))
+        doc.add(comment('api_key = "sk-xxxxxxxx"'))
+        doc.add(comment('base_url = "https://open.bigmodel.cn/api/paas/v4"'))
+        doc.add(comment('model = "glm-4-flash"  # 文本模型, 处理 /gpt 考核问答'))
+        doc.add(comment('vision_model = "glm-4v-flash"  # 视觉模型, 处理看图选按钮与图片验证码'))
+        doc.add(comment("timeout = 60"))
+        doc.add(comment('# helper_command = "python /app/helper.py"'))
+        doc.add(comment("# helper_timeout = 120"))
+        doc.add(comment("# skip_additional_auth = false  # true: 无条件跳过各站点 additional_auth 检查"))
+        doc.add(nl())
+
         doc.add(comment("=" * 80))
         doc.add(comment("Telegram 机器人签到相关设置"))
         doc.add(comment(f"详见: https://emby-keeper.github.io/guide/配置文件#checkiner-子项"))

@@ -3,6 +3,7 @@ Turnstile验证服务类
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import List, Optional
@@ -175,6 +176,33 @@ class TurnstileService:
             f"TurnstileService: 全部 solver 失败 ({len(self.solver_urls)} 个): {last_error}"
         ) from last_error
 
+    async def solve_turnstile_async(
+        self,
+        website_url,
+        website_key,
+        *,
+        timeout: Optional[float] = None,
+        action: str = "",
+        cdata: str = "",
+        **kwargs,
+    ):
+        """solve_turnstile 的异步包装.
+
+        同步实现内部用 requests + time.sleep, 直接调用会阻塞事件循环,
+        因此放到线程池执行; timeout 只限制等待时间, 不中断底层请求.
+        """
+        coro = asyncio.to_thread(
+            self.solve_turnstile,
+            website_url,
+            website_key,
+            action=action,
+            cdata=cdata,
+            **kwargs,
+        )
+        if timeout:
+            return await asyncio.wait_for(coro, timeout=float(timeout))
+        return await coro
+
     def _solve_with_backend(
         self,
         website_url,
@@ -183,8 +211,7 @@ class TurnstileService:
         action: str = "",
         cdata: str = "",
         max_attempts: int = 3,
-        retry_delay: float = 2.0,
-        solver_url: Optional[str] = None,
+        retry_delay: float = 2.0,        solver_url: Optional[str] = None,
     ):
         """在当前后端 (YesCaptcha 或指定 solver_url) 上重试 max_attempts 次."""
         if solver_url:

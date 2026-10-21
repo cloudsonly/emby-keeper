@@ -56,6 +56,11 @@ class LocalLink:
     def allow_remote_fallback(self) -> bool:
         return self.mode != "local"
 
+    @property
+    def skip_additional_auth(self) -> bool:
+        cfg = self.cfg
+        return bool(cfg and getattr(cfg, "skip_additional_auth", False))
+
     def supports_service(self, service: str) -> bool:
         # 这些是功能入口级认证, 本地替代开启后应允许进入, 再由具体站点按需检查额外能力.
         if service in {"registrar", "checkiner", "monitor", "messager"}:
@@ -64,6 +69,10 @@ class LocalLink:
         cfg = self.cfg
         if not cfg:
             return False
+
+        # 显式要求跳过所有附加认证: 一律放行, 不再逐项核对本地能力.
+        if self.skip_additional_auth:
+            return True
 
         supported = set()
         if self.has_llm:

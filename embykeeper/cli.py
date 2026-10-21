@@ -594,6 +594,8 @@ async def main(
             subsonic_man = SubsonicManager()
 
         pool = AsyncTaskPool()
+        # 单次运行 (-o / --once 且未设置 noexit) 时不会走到 start_notifier, 预先置空避免 finally 引用未定义变量.
+        streams = None
         telegram_runtime_tasks = {}
         media_runtime_tasks = {}
         runtime_restart_lock = asyncio.Lock()
@@ -841,7 +843,11 @@ async def main(
                     logger.debug(f"任务 {t.get_name()} 成功结束.")
         finally:
             if streams:
-                await asyncio.gather(*[stream.join() for stream in streams])
+                # 用 _stop_notifier 统一收尾: 它会 flush 队列并移除 handler,
+                # 直接 join stream 会让已入队的通知在退出时丢失.
+                from .notify import _stop_notifier
+
+                await _stop_notifier()
     finally:
         from .runinfo import RunContext
 

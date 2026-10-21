@@ -1,12 +1,13 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime
 import random
-from urllib.parse import quote
+import string
+from urllib.parse import parse_qs, quote, quote_plus, urljoin, urlparse
 import uuid
 from typing import Iterable, List, Union, Optional
 import re
 
+import httpx
 from loguru import logger
 from curl_cffi.requests import AsyncSession, Response, RequestsError
 from pydantic import BaseModel, ValidationError
@@ -52,21 +53,9 @@ class EmbyEnv(BaseModel):
     useragent: str
 
 
-@dataclass
-class PlaySessionResult:
-    session_started: bool = False
-    progress_updates: int = 0
-    stop_reported: bool = False
-    last_position_ticks: int = 0
-    stop_endpoint: Optional[str] = None
-
-    @property
-    def is_successful(self) -> bool:
-        return self.session_started and self.progress_updates > 0 and self.stop_reported
-
-
 class Emby:
     playing_count = 0
+    _transient_status_codes = (502, 503, 504, 520, 521, 522, 523, 524, 525)
 
     def __init__(self, account: EmbyAccount):
         self.a = account
@@ -74,13 +63,16 @@ class Emby:
         self._env = None
         self._token = None
         self._user_id = None
+        self._base_path = None
+        self._stream_max_bytes_per_request = 8 * 1024 * 1024
+        self._stream_max_request_seconds = 15
 
         self.run_id = str(uuid.uuid4()).upper()
         self.cf_clearance = None
         self.useragent = None
         self.items = {}
 
-        self.log = logger.bind(server=self.a.name or self.hostname, username=self.a.username)
+        self.log = logger.bind(server=self.a.name or self.server_label, username=self.a.username)
 
     @property
     def proxy(self):
@@ -89,6 +81,37 @@ class Emby:
     @property
     def hostname(self):
         return self.a.url.host
+
+    @property
+    def server_label(self):
+        path = (self.a.url.path or "").rstrip("/")
+        return f"{self.hostname}{path}" if path else self.hostname
+
+    @property
+    def use_special_stream_workaround(self):
+        return bool(self.a.stream_workaround)
+
+    @property
+    def use_external_stream_workaround(self):
+        return bool(self.a.external_stream_workaround)
+
+    @property
+    def use_stream_cdn_path(self):
+        return bool(self.a.stream_cdn_path)
+
+    @staticmethod
+    def _describe_response(resp: Response, limit: int = 200) -> str:
+        try:
+            body = (resp.text or "").strip()
+        except Exception:
+            body = ""
+
+        if body:
+            body = re.sub(r"\s+", " ", body)
+            if len(body) > limit:
+                body = f"{body[:limit]}..."
+            return f"响应内容: {body}"
+        return "响应内容为空"
 
     @property
     def token(self):
@@ -231,8 +254,8 @@ class Emby:
             "Version": self.env.client_version,
         }
         auth_header = ",".join([f"{k}={quote(str(v))}" for k, v in auth_headers.items()])
-        emby_user_id = self.user_id or self.run_id
-        full_auth_header = f'MediaBrowser Token={self.token or ""},Emby UserId={emby_user_id},{auth_header}'
+        auth_user_id = self.user_id or self.run_id
+        full_auth_header = f'MediaBrowser Token={self.token or ""},Emby UserId={auth_user_id},{auth_header}'
         headers["User-Agent"] = self.useragent or self.env.useragent
         headers["Accept-Language"] = "zh-CN,zh-Hans;q=0.9"
         headers["Content-Type"] = "application/json"
@@ -247,25 +270,155 @@ class Emby:
         if self.cf_clearance:
             cookies["cf_clearance"] = self.cf_clearance
 
+        timeout = self.a.timeout or config.emby.timeout or 10
+
         return AsyncSession(
             verify=False,
             headers=self.build_headers(),
             cookies=cookies,
             proxy=get_proxy_str(self.proxy, curl=True),
-            timeout=10.0,
+            timeout=float(timeout),
             impersonate="chrome",
             allow_redirects=True,
             default_headers=False,
         )
 
+    def _get_stream_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(connect=20.0, read=None, write=20.0, pool=20.0)
+
+    def _build_stream_headers(self, length: int) -> dict:
+        return {
+            "Range": f"bytes={length}-",
+            "User-Agent": self.useragent or self.env.useragent,
+            "Icy-MetaData": "1",
+        }
+
+    def _build_bounded_stream_headers(self, length: int, size: int) -> dict:
+        end = length + size - 1
+        return {
+            "Range": f"bytes={length}-{end}",
+            "User-Agent": self.useragent or self.env.useragent,
+            "Icy-MetaData": "1",
+        }
+
+    def _build_external_stream_headers(self, length: int) -> dict:
+        return {
+            "User-Agent": self.useragent or self.env.useragent,
+            "Accept": "*/*",
+            "Range": f"bytes={length}-",
+            "Connection": "close",
+            "Icy-MetaData": "1",
+        }
+
+    def _build_cdn_stream_url(self, media_source_path: str) -> str:
+        parsed = urlparse(media_source_path)
+        if not parsed.scheme or not parsed.netloc:
+            raise EmbyStatusError(f"访问失败: 无法解析媒体源 CDN 路径 (PATH = {media_source_path})")
+
+        if self.hostname.startswith("emby."):
+            cdn_host = self.hostname.replace("emby.", "emby-cdn1.", 1)
+        else:
+            cdn_host = f"emby-cdn1.{self.hostname}"
+
+        return f"https://{cdn_host}/cdn?path={quote_plus(media_source_path)}&api_key={self.token}"
+
+    def _build_cdn_stream_headers(self, length: int, size: int) -> dict:
+        end = length + size - 1
+        return {
+            "Authorization": (
+                f'MediaBrowser Client="Hills Windows", Device="DESKTOP-MKFV627", '
+                f'DeviceId="3f3a1fd2c899d30f888ef5f79103e432", Version="1.0.0", Token="{self.token}"'
+            ),
+            "User-Agent": "Hills Windows/1.0.0 (windows; 26100.ge_release.240331-1435)",
+            "Accept": "application/json, text/plain, */*",
+            "Range": f"bytes={length}-{end}",
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+            "Accept-Language": "zh-CN,en,*",
+            "Icy-MetaData": "1",
+        }
+
+    def _is_external_stream_url(self, value: str) -> bool:
+        parsed = urlparse(value)
+        if not parsed.scheme or not parsed.netloc:
+            return False
+
+        configured_port = self.a.url.port or (443 if self.a.url.scheme == "https" else 80)
+        parsed_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed.hostname != self.a.url.host or parsed_port != configured_port
+
+    @staticmethod
+    def _is_absolute_url(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        parsed = urlparse(value)
+        return bool(parsed.scheme and parsed.netloc)
+
+    def _update_media_source_info(
+        self,
+        media_source_id: str,
+        direct_stream_url: Optional[str],
+        media_source_path: Optional[str],
+        playback_info: dict,
+    ):
+        media_sources = playback_info.get("MediaSources") or []
+        if not media_sources:
+            return media_source_id, direct_stream_url, media_source_path
+
+        source = media_sources[0]
+        next_media_source_id = source.get("Id") or media_source_id
+        next_direct_stream_url = source.get("DirectStreamUrl") or direct_stream_url
+        next_media_source_path = source.get("Path")
+
+        if self._is_absolute_url(next_media_source_path):
+            media_source_path = next_media_source_path
+        elif not media_source_path and next_media_source_path:
+            media_source_path = next_media_source_path
+
+        return next_media_source_id, next_direct_stream_url, media_source_path
+
+    async def _probe_base_path(self, prefix: str) -> bool:
+        url = f"{self.a.url.scheme}://{self.a.url.host}:{self.a.url.port}{prefix}/System/Info/Public"
+        try:
+            async with self._get_session() as session:
+                resp: Response = await session.request("GET", url)
+                await resp.aclose()
+                return resp.ok
+        except RequestsError:
+            return False
+
+    async def _get_base_path(self) -> str:
+        if self._base_path is not None:
+            return self._base_path
+
+        configured_base_path = (self.a.url.path or "").rstrip("/")
+        if configured_base_path:
+            self._base_path = configured_base_path
+            return self._base_path
+
+        if not self.use_special_stream_workaround:
+            self._base_path = ""
+            return self._base_path
+
+        cache_key = f"emby.basepath.{self.hostname}"
+        cached_base_path = cache.get(cache_key, None)
+        if cached_base_path not in (None, ""):
+            self._base_path = cached_base_path
+            return self._base_path
+
+        for prefix in ("/emby", "/mediabrowser", ""):
+            if await self._probe_base_path(prefix):
+                self._base_path = prefix
+                cache.set(cache_key, prefix)
+                return self._base_path
+
+        self._base_path = ""
+        cache.set(cache_key, self._base_path)
+        return self._base_path
+
     async def _request(self, method: str, path: str, _login=False, **kw) -> Response:
 
-        if path.startswith(("http://", "https://")):
-            url = path
-        else:
-            base_url = f"{self.a.url.scheme}://{self.a.url.host}:{self.a.url.port}"
-            url = f"{base_url}/{path.lstrip('/')}"
-
+        url = await self._build_url(path)
         last_err = None
         for _ in range(3):
             try:
@@ -275,7 +428,8 @@ class Emby:
                         if not await self.login():
                             raise EmbyLoginError("无法登陆到服务器")
                         continue
-                    elif resp.status_code in (502, 503, 504):
+                    elif resp.status_code in self._transient_status_codes:
+                        # 站点前置反代或 Cloudflare 可能返回瞬时错误, 这里统一按可重试处理
                         await asyncio.sleep(random.random() * 2 + 0.5)
                         continue
                     elif resp.status_code == 403 and (
@@ -286,7 +440,10 @@ class Emby:
                         await self.use_cfsolver()
                         continue
                     elif not resp.ok and not _login:
-                        raise EmbyStatusError(f"访问失败: 异常 HTTP 代码 {resp.status_code} (URL = {url})")
+                        raise EmbyStatusError(
+                            f"访问失败: 异常 HTTP 代码 {resp.status_code} (URL = {url}, "
+                            f"{self._describe_response(resp)})"
+                        )
                     else:
                         return resp
             except RequestsError as e:
@@ -298,6 +455,14 @@ class Emby:
             raise EmbyConnectError(f"{last_err.__class__.__name__}: {error_msg}")
         else:
             raise EmbyConnectError(f'连接到 "{url}" 重试超限')
+
+    async def _build_url(self, path: str) -> str:
+        if path.startswith(("http://", "https://")):
+            return path
+
+        base_path = await self._get_base_path()
+        base_url = f"{self.a.url.scheme}://{self.a.url.host}:{self.a.url.port}{base_path}"
+        return f"{base_url}/{path.lstrip('/')}"
 
     async def use_cfsolver(self):
         from embykeeper.cloudflare import get_cf_clearance
@@ -383,7 +548,7 @@ class Emby:
             raise EmbyRequestError(f"无法获取服务器信息 ({resp.status_code})")
         return resp.json()
 
-    async def play(self, item: Union[dict, int], time: float = 10, total_ticks: Optional[int] = None):
+    async def play(self, item: Union[dict, int], time: float = 10):
         if isinstance(item, dict):
             try:
                 iid = item["Id"]
@@ -396,121 +561,81 @@ class Emby:
 
         playback_info_data = {
             "DeviceProfile": {
-                "CodecProfiles": [
-                    {
-                        "ApplyConditions": [
-                            {
-                                "IsRequired": False,
-                                "Value": "true",
-                                "Condition": "NotEquals",
-                                "Property": "IsAnamorphic",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "high|main|baseline|constrained baseline",
-                                "Condition": "EqualsAny",
-                                "Property": "VideoProfile",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "80",
-                                "Condition": "LessThanEqual",
-                                "Property": "VideoLevel",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "true",
-                                "Condition": "NotEquals",
-                                "Property": "IsInterlaced",
-                            },
-                        ],
-                        "Type": "Video",
-                        "Codec": "h264",
-                    },
-                    {
-                        "ApplyConditions": [
-                            {
-                                "IsRequired": False,
-                                "Value": "true",
-                                "Condition": "NotEquals",
-                                "Property": "IsAnamorphic",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "high|main|main 10",
-                                "Condition": "EqualsAny",
-                                "Property": "VideoProfile",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "175",
-                                "Condition": "LessThanEqual",
-                                "Property": "VideoLevel",
-                            },
-                            {
-                                "IsRequired": False,
-                                "Value": "true",
-                                "Condition": "NotEquals",
-                                "Property": "IsInterlaced",
-                            },
-                        ],
-                        "Type": "Video",
-                        "Codec": "hevc",
-                    },
-                ],
+                "CodecProfiles": [],
                 "SubtitleProfiles": [
-                    {"Method": "Embed", "Format": "ass"},
-                    {"Method": "Embed", "Format": "ssa"},
-                    {"Method": "Embed", "Format": "subrip"},
-                    {"Method": "Embed", "Format": "sub"},
-                    {"Method": "Embed", "Format": "pgssub"},
-                    {"Method": "External", "Format": "subrip"},
-                    {"Method": "External", "Format": "sub"},
-                    {"Method": "External", "Format": "ass"},
-                    {"Method": "External", "Format": "ssa"},
                     {"Method": "External", "Format": "vtt"},
                     {"Method": "External", "Format": "ass"},
                     {"Method": "External", "Format": "ssa"},
+                    {"Method": "External", "Format": "srt"},
+                    {"Method": "External", "Format": "sub"},
+                    {"Method": "External", "Format": "subrip"},
+                    {"Method": "External", "Format": "smi"},
+                    {"Method": "External", "Format": "ttml"},
+                    {"Method": "External", "Format": "webvtt"},
+                    {"Method": "External", "Format": "dvdsub"},
+                    {"Method": "External", "Format": "sup"},
+                    {"Method": "Embed", "Format": "dvdsub"},
+                    {"Method": "Embed", "Format": "vobsub"},
+                    {"Method": "Embed", "Format": "vtt"},
+                    {"Method": "Embed", "Format": "ass"},
+                    {"Method": "Embed", "Format": "ssa"},
+                    {"Method": "Embed", "Format": "srt"},
+                    {"Method": "Embed", "Format": "sub"},
+                    {"Method": "Embed", "Format": "pgssub"},
+                    {"Method": "Embed", "Format": "pgs"},
+                    {"Method": "Embed", "Format": "subrip"},
+                    {"Method": "Embed", "Format": "smi"},
+                    {"Method": "Embed", "Format": "ttml"},
+                    {"Method": "Embed", "Format": "webvtt"},
+                    {"Method": "Embed", "Format": "mov_text"},
+                    {"Method": "Embed", "Format": "dvb_teletext"},
+                    {"Method": "Embed", "Format": "dvb_subtitle"},
+                    {"Method": "Embed", "Format": "dvbsub"},
+                    {"Method": "Embed", "Format": "idx"},
+                    {"Method": "Embed", "Format": "sup"},
+                    {"Method": "Hls", "Format": "vtt"},
+                    {"Method": "Hls", "Format": "vtt"},
                 ],
-                "MaxStreamingBitrate": 40000000,
+                "MaxStreamingBitrate": 200000000,
                 "DirectPlayProfiles": [
-                    {
-                        "Container": "mov,mp4,mkv,webm",
-                        "Type": "Video",
-                        "VideoCodec": "h264,hevc,dvhe,dvh1,h264,hevc,hev1,mpeg4,vp9",
-                        "AudioCodec": "aac,mp3,wav,ac3,eac3,flac,truehd,dts,dca,opus",
-                    }
+                    {"Type": "Video"},
+                    {"Type": "Audio"},
                 ],
                 "TranscodingProfiles": [
                     {
-                        "MinSegments": 2,
                         "AudioCodec": "aac,mp3,wav,ac3,eac3,flac,opus",
-                        "VideoCodec": "hevc,h264,mpeg4",
+                        "VideoCodec": "hevc,h264,h265,mpeg4",
                         "BreakOnNonKeyFrames": True,
                         "Type": "Video",
                         "Protocol": "hls",
                         "MaxAudioChannels": "6",
                         "Container": "ts",
                         "Context": "Streaming",
+                        "MinSegments": "1",
+                        "ManifestSubtitles": "vtt",
                     }
                 ],
                 "ContainerProfiles": [],
-                "MusicStreamingTranscodingBitrate": 40000000,
-                "ResponseProfiles": [{"MimeType": "video\\/mp4", "Container": "m4v", "Type": "Video"}],
-                "MaxStaticBitrate": 40000000,
+                "MusicStreamingTranscodingBitrate": 200000000,
+                "ResponseProfiles": [],
+                "MaxStaticBitrate": 200000000,
             }
         }
 
-        resp = await self._request(
-            method="GET",
-            path=f"/Videos/{iid}/AdditionalParts",
-            params=dict(
-                Fields="PrimaryImageAspectRatio,UserData,CanDelete",
-                IncludeItemTypes="Playlist,BoxSet",
-                Recursive=True,
-                SortBy="SortName",
-            ),
-        )
+        try:
+            await self._request(
+                method="GET",
+                path=f"/Videos/{iid}/AdditionalParts",
+                params=dict(
+                    Fields="PrimaryImageAspectRatio,UserData,CanDelete",
+                    IncludeItemTypes="Playlist,BoxSet",
+                    Recursive=True,
+                    SortBy="SortName",
+                ),
+            )
+        except EmbyStatusError:
+            # 部分服务器不支持该接口, 忽略错误继续播放
+            pass
 
         resp = await self._request(
             method="POST",
@@ -526,15 +651,34 @@ class Emby:
         )
         playback_info = resp.json()
 
-        play_session_id = playback_info.get("PlaySessionId", "")
-        media_sources = playback_info.get("MediaSources") or []
-        primary_media_source = media_sources[0] if media_sources else {}
-        media_source_id = primary_media_source.get("Id") or playback_info.get("MediaSourceId")
-        direct_stream_url = primary_media_source.get("DirectStreamUrl") or playback_info.get(
-            "DirectStreamUrl", None
-        )
-        if not media_source_id:
-            raise EmbyPlayError("无可用媒体源, 无法开始播放.")
+        play_session_id = ""
+        media_source_id = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(32))
+        direct_stream_url = None
+        media_source_path = None
+
+        def update_playback_info(info):
+            nonlocal media_source_id, direct_stream_url, media_source_path, play_session_id
+
+            media_source_id, direct_stream_url, media_source_path = self._update_media_source_info(
+                media_source_id,
+                direct_stream_url,
+                media_source_path,
+                info,
+            )
+            response_session_id = info.get("PlaySessionId")
+            if response_session_id:
+                play_session_id = str(response_session_id)
+
+            # 自研后端可能把租约 ID 只放在最终流地址中, 上报必须与实际请求使用同一个 ID。
+            if direct_stream_url:
+                stream_query = parse_qs(urlparse(direct_stream_url).query)
+                for key in ("PlaySessionId", "playSessionId"):
+                    stream_session_id = stream_query.get(key, [None])[0]
+                    if stream_session_id:
+                        play_session_id = stream_session_id
+                        break
+
+        update_playback_info(playback_info)
 
         await asyncio.sleep(random.uniform(1, 3))
 
@@ -561,18 +705,12 @@ class Emby:
                 ),
                 json=playback_info_data,
             )
+            update_playback_info(resp.json())
 
-        playback_start_ticks = int(datetime.now().timestamp() // 10 * 10 * 10000000)
-        max_position_ticks = int(total_ticks) if total_ticks and total_ticks > 0 else None
-
-        def normalize_tick(tick):
-            tick = max(0, int(tick))
-            if max_position_ticks is not None:
-                tick = min(tick, max_position_ticks)
-            return tick
+        # int4 上限 (PostgreSQL)，部分服务器使用 int4 存储 ticks，超出会报 500
+        _INT4_MAX = 2_147_483_647
 
         def get_playing_data(tick, update=False, stop=False):
-            tick = normalize_tick(tick)
             data = {
                 "SubtitleOffset": 0,
                 "MaxStreamingBitrate": 420000000,
@@ -580,12 +718,12 @@ class Emby:
                 "SubtitleStreamIndex": -1,
                 "VolumeLevel": 100,
                 "PlaybackRate": 1,
-                "PlaybackStartTimeTicks": playback_start_ticks,
-                "PositionTicks": tick,
+                "PlaybackStartTimeTicks": int(datetime.now().timestamp() // 10 * 10 * 10000000),
+                "PositionTicks": min(tick, _INT4_MAX),
                 "PlaySessionId": play_session_id,
             }
             if update:
-                data["EventName"] = "timeupdate"
+                data["EventName"] = "TimeUpdate"
             if stop:
                 queue = []
             else:
@@ -606,45 +744,105 @@ class Emby:
             )
             return data
 
-        stream_started = False
-
         async def stream():
-            nonlocal stream_started
             url = direct_stream_url or f"/Videos/{iid}/stream"
             length = 0
-            last_err_time = datetime.now()
+            consecutive_stream_errors = 0
             while True:
-                resp = await self._request(
-                    method="GET",
-                    path=url,
-                    stream=True,
-                    max_recv_speed=1024,
-                    timeout=None,
-                    headers={
-                        "Range": f"bytes={length}-",
-                        "User-Agent": "VLC/3.0.21 LibVLC/3.0.21",
-                        "X-Playback-Session-Id": play_session_id,
-                    },
-                )
-                if not stream_started:
-                    stream_started = True
-                    self.log.debug(f'已开始请求视频流: "{truncate_str(iname, 10)}".')
+                if self.use_stream_cdn_path and media_source_path:
+                    max_bytes_per_request = 16 * 1024 * 1024
+                    max_request_seconds = min(self._stream_max_request_seconds, 10)
+                    stream_url = self._build_cdn_stream_url(media_source_path)
+                    stream_headers = self._build_cdn_stream_headers(length, max_bytes_per_request)
+                else:
+                    stream_url = await self._build_url(url)
+                    stream_headers = self._build_stream_headers(length)
+                    max_bytes_per_request = self._stream_max_bytes_per_request
+                    max_request_seconds = self._stream_max_request_seconds
+                    if self._is_external_stream_url(stream_url):
+                        if self.use_external_stream_workaround:
+                            max_bytes_per_request = min(max_bytes_per_request, 256 * 1024)
+                            max_request_seconds = min(max_request_seconds, 2)
+                        elif self.use_special_stream_workaround:
+                            max_bytes_per_request = min(max_bytes_per_request, 2 * 1024 * 1024)
+                            max_request_seconds = min(max_request_seconds, 5)
+                        stream_headers = self._build_external_stream_headers(length)
+                response = None
+                response_cm = None
+                client = None
                 try:
-                    async for i in resp.aiter_content(chunk_size=1024):
-                        length += len(i)
+                    client = httpx.AsyncClient(
+                        verify=False,
+                        timeout=self._get_stream_timeout(),
+                        follow_redirects=False,
+                        http2=False,
+                        headers=stream_headers,
+                    )
+                    response_cm = client.stream("GET", stream_url)
+                    response = await response_cm.__aenter__()
+
+                    if response.status_code in (301, 302, 307, 308):
+                        redirect_url = response.headers.get("Location")
+                        parsed_original = urlparse(stream_url)
+                        await response_cm.__aexit__(None, None, None)
+                        response_cm = None
+                        await client.aclose()
+                        client = None
+                        if not redirect_url:
+                            raise EmbyStatusError(f"访问失败: 流媒体重定向缺少目标地址 (URL = {stream_url})")
+                        parsed_redirect = urlparse(redirect_url)
+                        redirect_headers = stream_headers
+                        if parsed_redirect.netloc and parsed_redirect.netloc != parsed_original.netloc:
+                            if self.use_external_stream_workaround:
+                                max_bytes_per_request = min(max_bytes_per_request, 256 * 1024)
+                                max_request_seconds = min(max_request_seconds, 2)
+                            elif self.use_special_stream_workaround:
+                                max_bytes_per_request = min(max_bytes_per_request, 2 * 1024 * 1024)
+                                max_request_seconds = min(max_request_seconds, 5)
+                            redirect_headers = self._build_external_stream_headers(length)
+
+                        client = httpx.AsyncClient(
+                            verify=False,
+                            timeout=self._get_stream_timeout(),
+                            follow_redirects=False,
+                            http2=False,
+                            headers=redirect_headers,
+                        )
+                        response_cm = client.stream("GET", redirect_url)
+                        response = await response_cm.__aenter__()
+
+                    if response.status_code >= 400:
+                        raise EmbyStatusError(
+                            f"访问失败: 异常 HTTP 代码 {response.status_code} (URL = {response.request.url}, "
+                            f"{self._describe_response(response)})"
+                        )
+
+                    request_started_at = datetime.now()
+                    read_bytes = 0
+                    async for i in response.aiter_bytes(chunk_size=1024):
+                        chunk_length = len(i)
+                        length += chunk_length
+                        read_bytes += chunk_length
                         del i
                         await asyncio.sleep(random.random())
+                        elapsed = (datetime.now() - request_started_at).total_seconds()
+                        if read_bytes >= max_bytes_per_request or elapsed >= max_request_seconds:
+                            break
                         if random.random() < 0.01:
                             continue
-                except RequestsError:
-                    if (datetime.now() - last_err_time).total_seconds() > 5:
-                        self.log.debug("流媒体文件访问错误, 正在重试.")
-                        last_err_time = datetime.now()
-                        continue
-                    else:
+                    consecutive_stream_errors = 0
+                except (httpx.HTTPError, httpx.TimeoutException, EmbyStatusError) as e:
+                    consecutive_stream_errors += 1
+                    if consecutive_stream_errors > 3:
                         raise
+                    self.log.debug(f"流媒体文件访问错误, 正在重试 ({consecutive_stream_errors}/3): {e}")
+                    await asyncio.sleep(min(consecutive_stream_errors * 2, 10))
+                    continue
                 finally:
-                    await resp.aclose()
+                    if response_cm is not None:
+                        await response_cm.__aexit__(None, None, None)
+                    if client is not None:
+                        await client.aclose()
 
         stream_task = asyncio.create_task(stream())
         rt = random.uniform(5, 10)
@@ -652,9 +850,7 @@ class Emby:
         await asyncio.sleep(rt)
         self.log.info(f'开始发送视频 "{truncate_str(iname, 10)}" 发送进度.')
         Emby.playing_count += 1
-        session_started = False
-        progress_updates = 0
-        last_position_tick = 0
+        stream_error = None
         try:
             await asyncio.sleep(random.uniform(1, 3))
             try:
@@ -663,22 +859,54 @@ class Emby:
                     path="/Sessions/Playing",
                     json=get_playing_data(0),
                 )
-                session_started = True
-                self.log.debug(
-                    f'播放会话已创建: "{truncate_str(iname, 10)}" ({play_session_id or "unknown"}).'
-                )
             except EmbyRequestError as e:
                 raise EmbyPlayError(f"无法开始播放: {e}")
             t = time
 
             last_report_t = t
-            progress_errors = 0
+            consecutive_progress_errors = 0
+            max_progress_errors = 4
+            last_progress_error = None
+            progress_reporting_enabled = True
+            lease_recovery_attempted = False
             report_interval = 5  # Start with 5 seconds
             report_count = 0
             max_interval = 300  # 5 minutes in seconds
+
+            async def report_progress(payload, tick):
+                nonlocal lease_recovery_attempted
+
+                try:
+                    # 由请求层按配置控制超时和重试, 避免外层提前取消请求并丢失错误详情
+                    return await self._request(
+                        method="POST",
+                        path="/Sessions/Playing/Progress",
+                        json=payload,
+                    )
+                except Exception as e:
+                    if lease_recovery_attempted or "playback_lease_inactive" not in str(e).lower():
+                        raise
+
+                    lease_recovery_attempted = True
+                    self.log.warning("播放租约已失效, 重新发送播放开始事件后重试进度.")
+                    await self._request(
+                        method="POST",
+                        path="/Sessions/Playing",
+                        json=get_playing_data(tick),
+                    )
+                    try:
+                        response = await self._request(
+                            method="POST",
+                            path="/Sessions/Playing/Progress",
+                            json=payload,
+                        )
+                    except Exception:
+                        raise
+                    else:
+                        lease_recovery_attempted = False
+                        return response
+
             while t > 0:
-                if progress_errors > 12:
-                    raise EmbyPlayError("播放状态设定错误次数过多")
                 if last_report_t and last_report_t - t > report_interval:
                     self.log.info(f'正在播放: "{truncate_str(iname, 10)}" (还剩 {t:.0f} 秒).')
                     last_report_t = t
@@ -690,24 +918,34 @@ class Emby:
                 st = min(10, t)
                 await asyncio.sleep(st)
                 t -= st
+                if not progress_reporting_enabled:
+                    continue
                 tick = int((time - t) * 10000000)
                 payload = get_playing_data(tick, update=True)
                 try:
-                    resp = await asyncio.wait_for(
-                        self._request(
-                            method="POST",
-                            path="/Sessions/Playing/Progress",
-                            json=payload,
-                        ),
-                        10,
-                    )
-                    progress_updates += 1
-                    last_position_tick = payload["PositionTicks"]
-                    if progress_updates == 1 or progress_updates % 5 == 0:
-                        self.log.debug(f'已发送 {progress_updates} 次播放进度: "{truncate_str(iname, 10)}".')
+                    resp = await report_progress(payload, tick)
                 except Exception as e:
-                    self.log.debug(f"播放状态设定错误: {e}")
-                    progress_errors += 1
+                    last_progress_error = str(e) or type(e).__name__
+                    consecutive_progress_errors += 1
+                    if consecutive_progress_errors in (1, 3, max_progress_errors):
+                        self.log.warning(
+                            "播放状态设定错误"
+                            f" ({consecutive_progress_errors}/{max_progress_errors}): {last_progress_error}"
+                        )
+                    else:
+                        self.log.debug(f"播放状态设定错误: {e}")
+                    if consecutive_progress_errors >= max_progress_errors:
+                        if self.a.progress_fallback:
+                            progress_reporting_enabled = False
+                            self.log.warning(
+                                "播放进度上报连续失败, 将继续模拟播放并在结束时仅发送停止事件: "
+                                f"{last_progress_error}"
+                            )
+                        else:
+                            raise EmbyPlayError(f"播放进度上报连续失败: {last_progress_error}")
+                else:
+                    consecutive_progress_errors = 0
+                    last_progress_error = None
             await asyncio.sleep(random.uniform(1, 3))
         finally:
             Emby.playing_count -= 1
@@ -717,77 +955,104 @@ class Emby:
             except asyncio.CancelledError:
                 pass
             except Exception as e:
+                stream_error = e
                 self.log.warning(f"模拟播放时, 访问流媒体文件失败.")
                 show_exception(e)
 
         try:
-            final_tick = last_position_tick or normalize_tick(time * 10000000)
-            stop_payload = get_playing_data(final_tick, stop=True)
-            stop_endpoint = "/Sessions/Playing/Stopped"
-            try:
-                await self._request(
-                    method="POST",
-                    path=stop_endpoint,
-                    json=stop_payload,
-                )
-            except Exception as stop_error:
-                self.log.debug(f"播放停止上报失败, 正在尝试兼容性回退: {stop_error}")
-                stop_endpoint = "/Sessions/Playing/Progress"
-                await self._request(
-                    method="POST",
-                    path=stop_endpoint,
-                    json=stop_payload,
-                )
-            self.log.info(f"播放完成, 共 {time:.0f} 秒.")
-            return PlaySessionResult(
-                session_started=session_started,
-                progress_updates=progress_updates,
-                stop_reported=True,
-                last_position_ticks=stop_payload["PositionTicks"],
-                stop_endpoint=stop_endpoint,
+            final_percentage = random.uniform(0.95, 1.0)
+            final_tick = int((time * final_percentage) // 10 * 10 * 10000000)
+            await self._request(
+                method="POST",
+                path="/Sessions/Playing/Stopped",
+                json=get_playing_data(final_tick, stop=True),
             )
+            if stream_error:
+                self.log.info(f"播放完成 (流媒体访问有错误, 但进度上报正常), 共 {time:.0f} 秒.")
+            else:
+                self.log.info(f"播放完成, 共 {time:.0f} 秒.")
+            return True
         except Exception as e:
+            if isinstance(e, EmbyPlayError):
+                raise
             raise EmbyPlayError(f"由于连接错误或服务器错误无法停止播放: {e}")
 
     async def load_main_page(self):
-        views = await self._request(
-            method="GET",
-            path=f"/Users/{self.user_id}/Views",
-            params=dict(IncludeExternalContent=False),
-        )
-
         col_ids = []
-        for i in views.json().get("Items", []):
-            cid: str = i.get("Id", None)
-            type: str = i.get("CollectionType")
-            if cid and type and type.lower() in ("movies", "tvshows"):
-                col_ids.append(cid)
+        try:
+            views = await self._request(
+                method="GET",
+                path=f"/Users/{self.user_id}/Views",
+                params=dict(IncludeExternalContent=False),
+            )
+            for i in views.json().get("Items", []):
+                cid: str = i.get("Id", None)
+                type: str = i.get("CollectionType")
+                if cid and type and type.lower() in ("movies", "tvshows"):
+                    col_ids.append(cid)
+        except EmbyError as e:
+            # 部分站点首页目录接口不稳定, 此时改走继续媒体恢复和全站最新项目的兜底逻辑
+            self.log.warning(f"获取首页目录失败, 将继续尝试其他取片方式: {e}")
         await asyncio.sleep(random.uniform(0.1, 0.3))
 
-        user = await self._request(method="GET", path=f"/Users/{self.user_id}")
-        last_login_date = user.json().get("LastLoginDate", None)
+        last_login_date = None
+        try:
+            # 部分站点会对用户详情接口单独挂反代或风控, 该接口失败时不应影响首页取片流程
+            user = await self._request(method="GET", path=f"/Users/{self.user_id}")
+            last_login_date = user.json().get("LastLoginDate", None)
+        except EmbyError as e:
+            self.log.warning(f"获取用户信息失败, 将继续尝试加载首页项目: {e}")
         await asyncio.sleep(random.uniform(0.1, 0.3))
 
-        await self._request(
-            method="GET",
-            path=f"/DisplayPreferences/usersettings",
-            params=dict(client="emby", userId=self.user_id),
-        )
+        try:
+            await self._request(
+                method="GET",
+                path=f"/DisplayPreferences/usersettings",
+                params=dict(client="emby", userId=self.user_id),
+            )
+        except EmbyError as e:
+            self.log.warning(f"获取显示偏好失败, 将继续尝试加载首页项目: {e}")
         await asyncio.sleep(random.uniform(0.1, 0.3))
 
-        await self.get_resume_items(media_types=["Video"])
-        await asyncio.sleep(random.uniform(0.1, 0.3))
-        await self.get_resume_items(media_types=["Audio"])
-        await asyncio.sleep(random.uniform(0.1, 0.3))
-
-        for cid in col_ids[:25]:
-            items = await self.get_latest_items(parent_id=cid)
-            for item in items:
+        try:
+            for item in await self.get_resume_items(media_types=["Video"]):
                 try:
-                    iid = item["Id"]
-                    self.items[iid] = item
+                    self.items[item["Id"]] = item
                 except KeyError:
                     pass
+        except EmbyError as e:
+            self.log.warning(f"获取视频继续观看列表失败, 将继续尝试其他取片方式: {e}")
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        try:
+            await self.get_resume_items(media_types=["Audio"])
+        except EmbyError as e:
+            self.log.warning(f"获取音频继续观看列表失败, 将继续尝试其他取片方式: {e}")
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+
+        if col_ids:
+            for cid in col_ids[:25]:
+                try:
+                    items = await self.get_latest_items(parent_id=cid)
+                except EmbyError as e:
+                    self.log.warning(f"获取目录最新项目失败, 将尝试其他目录: {e}")
+                    continue
+                for item in items:
+                    try:
+                        iid = item["Id"]
+                        self.items[iid] = item
+                    except KeyError:
+                        pass
+        else:
+            try:
+                # 无法获取目录时, 直接拉取全站最新视频作为兜底
+                for item in await self.get_latest_items():
+                    try:
+                        iid = item["Id"]
+                        self.items[iid] = item
+                    except KeyError:
+                        pass
+            except EmbyError as e:
+                self.log.warning(f"获取全站最新项目失败, 将尝试文件夹取片兜底: {e}")
 
         if not self.items:
             if col_ids:
@@ -795,7 +1060,11 @@ class Emby:
 
                 for col_id in col_ids[:3]:
                     await asyncio.sleep(4)
-                    items = await self.get_folder_items(parent_id=col_id)
+                    try:
+                        items = await self.get_folder_items(parent_id=col_id)
+                    except EmbyError as e:
+                        self.log.warning(f"从目录读取视频失败, 将尝试其他目录: {e}")
+                        continue
                     for item in items:
                         try:
                             iid = item["Id"]
@@ -806,6 +1075,32 @@ class Emby:
                         break
 
         return last_login_date
+
+    async def resolve_playable_item(self, iid: str, item: dict) -> Optional[dict]:
+        if item.get("MediaType") == "Video":
+            return item
+
+        try:
+            detail = await self.get_item(iid)
+        except EmbyError:
+            return None
+
+        if detail.get("MediaType") == "Video":
+            self.items[iid] = detail
+            return detail
+
+        item_type = detail.get("Type") or item.get("Type")
+        if item_type in ("Series", "Season", "BoxSet", "Folder"):
+            children = await self.get_folder_items(parent_id=iid, limit=24)
+            for child in children:
+                child_id = child.get("Id")
+                if child_id:
+                    self.items[child_id] = child
+            for child in children:
+                if child.get("MediaType") == "Video":
+                    return child
+
+        return None
 
     async def get_latest_items(
         self,
@@ -827,17 +1122,19 @@ class Emby:
                 "EndDate",
                 "CanDelete",
             ]
+        params = {
+            "EnableImageTypes": ",".join(enable_image_types),
+            "Fields": ",".join(fields),
+            "GroupItems": group_items,
+            "Limit": limit,
+            **kw,
+        }
+        if parent_id:
+            params["ParentId"] = parent_id
         resp = await self._request(
             method="GET",
             path=f"/Users/{self.user_id}/Items/Latest",
-            params={
-                "EnableImageTypes": ",".join(enable_image_types),
-                "Fields": ",".join(fields),
-                "GroupItems": group_items,
-                "Limit": limit,
-                "ParentId": parent_id,
-                **kw,
-            },
+            params=params,
         )
         return resp.json()
 
@@ -867,7 +1164,10 @@ class Emby:
                 **kw,
             },
         )
-        return resp.json()
+        data = resp.json()
+        if isinstance(data, dict):
+            return data.get("Items", [])
+        return data
 
     async def get_folder_items(
         self,
@@ -888,7 +1188,7 @@ class Emby:
                 "EnableImageTypes": ",".join(enable_image_types),
                 "Fields": ",".join(fields),
                 "ImageTypeLimit": 1,
-                "IncludeItemTypes": "Movie",
+                "IncludeItemTypes": "Movie,Episode",
                 "Limit": limit,
                 "ParentId": parent_id,
                 "Recursive": "true",
@@ -901,13 +1201,53 @@ class Emby:
         return resp.json().get("Items", [])
 
     async def get_item(self, iid, **kw) -> dict:
-        resp = await self._request(method="GET", path=f"/Users/{self.user_id}/Items/{iid}")
-        return resp.json()
+        path = f"/Users/{self.user_id}/Items/{iid}"
+        resp = await self._request(method="GET", path=path)
+        try:
+            item = resp.json()
+        except ValueError as e:
+            # 反代可能返回空响应或 HTML, 统一转换为业务异常以进入现有容错和重试流程
+            raise EmbyStatusError(
+                f"获取视频详情失败: 响应不是有效 JSON (HTTP {resp.status_code}, "
+                f"接口 = {path}, {self._describe_response(resp)})"
+            ) from e
+        if not isinstance(item, dict):
+            raise EmbyStatusError(
+                f"获取视频详情失败: 响应不是 JSON 对象 (HTTP {resp.status_code}, 接口 = {path})"
+            )
+        return item
 
     async def get_user(self) -> dict:
         """Get current user information."""
         response = await self._request("GET", f"/Users/{self.user_id}")
         return response.json()
+
+    @staticmethod
+    def _get_playback_evidence(before_item: Optional[dict], after_item: Optional[dict]) -> Optional[str]:
+        before_user_data = (before_item or {}).get("UserData") or {}
+        after_user_data = (after_item or {}).get("UserData") or {}
+
+        before_play_count = before_user_data.get("PlayCount") or 0
+        after_play_count = after_user_data.get("PlayCount") or 0
+        if after_play_count > before_play_count or (before_play_count < 1 and after_play_count >= 1):
+            return f"播放次数已更新为 {after_play_count}"
+
+        before_played = bool(before_user_data.get("Played"))
+        after_played = bool(after_user_data.get("Played"))
+        if not before_played and after_played:
+            return "视频已标记为已播放"
+
+        before_last_played = before_user_data.get("LastPlayedDate")
+        after_last_played = after_user_data.get("LastPlayedDate")
+        if after_last_played and after_last_played != before_last_played:
+            return "最后播放时间已更新"
+
+        before_position_ticks = before_user_data.get("PlaybackPositionTicks") or 0
+        after_position_ticks = after_user_data.get("PlaybackPositionTicks") or 0
+        if after_position_ticks > before_position_ticks:
+            return f"播放进度已更新到 {after_position_ticks}"
+
+        return None
 
     async def mark_played(self, item_id: str) -> bool:
         """Mark an item as played."""
@@ -950,10 +1290,11 @@ class Emby:
                         continue
                 except KeyError:
                     continue
-                media_type = item.get("MediaType", None)
-                if not media_type == "Video":
+                item = await self.resolve_playable_item(iid, item)
+                if not item:
                     failed_reasons["wrong_type"] += 1
                     continue
+                iid = item["Id"]
                 total_ticks = item.get("RunTimeTicks", None)
                 if not total_ticks:
                     if self.a.allow_stream:
@@ -971,6 +1312,7 @@ class Emby:
                     play_time = total_time
                 else:
                     play_time = remaining_time
+                # 进度上报的 PositionTicks 不能超过视频实际时长, 否则部分站点会拒绝或计为无效播放.
                 play_time = min(play_time, total_time)
                 if play_time <= 0:
                     failed_reasons["short_length"] += 1
@@ -980,27 +1322,43 @@ class Emby:
                 self.log.debug(f"视频 ID: {iid}.")
                 while True:
                     try:
-                        play_result = await self.play(item, time=play_time, total_ticks=total_ticks)
-                        if not play_result.is_successful:
-                            raise EmbyPlayError("播放会话未完整建立或未完成进度回传")
+                        try:
+                            before_item = await self.get_item(iid)
+                        except EmbyError as e:
+                            # 部分站点详情接口不稳定, 无法获取播放前状态时仍继续尝试实际播放
+                            self.log.warning(f"获取播放前视频状态失败, 将继续尝试播放: {e}")
+                            before_item = item
+                        await self.play(item, time=play_time)
                         await asyncio.sleep(random.random())
-                        play_count = None
                         try:
                             item = await self.get_item(iid)
-                            play_count = item.get("UserData", {}).get("PlayCount", None)
                         except EmbyError as e:
-                            self.log.debug(f"播放完成后获取服务端播放信息失败: {e}")
-                        if play_count is None:
-                            self.log.info(
-                                f"[yellow]成功播放视频[/], 已完成会话建立与进度回传 (Stop={play_result.stop_endpoint})."
-                            )
-                        else:
-                            self.log.info(
-                                f"[yellow]成功播放视频[/], 已完成会话建立与进度回传, 当前服务端播放次数: {play_count}."
-                            )
+                            self.log.warning(f"获取播放后视频状态失败, 将尝试补记播放状态: {e}")
+                            item = None
+                        playback_evidence = self._get_playback_evidence(before_item, item)
+                        if not playback_evidence:
+                            self.log.info("播放后未检测到播放状态变化, 正在尝试补记播放状态.")
+                            if await self.mark_played(iid):
+                                await asyncio.sleep(random.random())
+                                try:
+                                    item = await self.get_item(iid)
+                                except EmbyError as e:
+                                    self.log.warning(f"补记后获取视频状态失败, 将按补记成功处理: {e}")
+                                    item = None
+                                    playback_evidence = "已调用 PlayedItems 接口补记播放状态"
+                                else:
+                                    playback_evidence = (
+                                        self._get_playback_evidence(before_item, item)
+                                        or "已调用 PlayedItems 接口补记播放状态"
+                                    )
+                        if not playback_evidence:
+                            raise EmbyPlayError("播放后未检测到播放状态变化")
+                        play_count = (item or {}).get("UserData", {}).get("PlayCount", 0)
+                        self.log.info(
+                            f"[yellow]成功播放视频[/], {playback_evidence}, 当前该视频播放 {play_count} 次."
+                        )
                         played_videos += 1
                         played_time += play_time
-                        retry = 0
                         if played_time >= req_time - 1:
                             self.log.bind(log=True).info(f"保活成功, 共播放 {played_videos} 个视频.")
                             return True

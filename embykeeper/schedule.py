@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, time, timedelta
 from dateutil import parser
+import random
 import re
 from typing import Callable, Union
 import json
@@ -145,7 +146,12 @@ class Scheduler:
         if not next_time:
             # Calculate interval days
             if isinstance(self.days, (list, tuple)):
-                interval = self.days[0] + (self.days[1] - self.days[0])
+                # 区间配置 "<min,max>" 需在区间内随机取值;
+                # 原先写 days[0] + (days[1] - days[0]) 恒等于 days[1], 区间形同虚设.
+                low, high = int(self.days[0]), int(self.days[1])
+                if low > high:
+                    low, high = high, low
+                interval = random.randint(low, high)
             else:
                 interval = self.days
 

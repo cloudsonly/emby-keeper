@@ -18,6 +18,15 @@ interval_days = "<7,12>"
 # 最大可同时进行的站点数:
 concurrency = 1
 
+# 是否在播放前随机等待, 设为 false 可立即开始播放:
+random_delay = true
+
+# 播放前随机等待的时间范围 (秒), 仅 random_delay = true 时生效:
+random_delay_range = [180, 360]
+
+# 每个 Emby 请求的超时时间 (秒), 对慢站点可适当调大:
+timeout = 10
+
 # ================================================================================
 # Emby 账号, 您可以重复该片段多次以增加多个账号.
 # 详见: https://emby-keeper.github.io/guide/配置文件#emby-account-子项
@@ -43,6 +52,21 @@ time = [300, 600]
 # 每次进行保活的当日时间范围, 默认使用全局设置 emby.time_range:
 # time_range = "<11:00AM,11:00PM>"
 
+# 该账号的请求超时时间 (秒), 默认使用全局设置 emby.timeout:
+# timeout = 10
+
+# 流媒体请求使用兼容模式 (部分反代 / CDN 站点会拒绝默认的 Range 与分块读取):
+# stream_workaround = true
+
+# 外部流媒体地址使用兼容模式:
+# external_stream_workaround = true
+
+# 通过站点的 CDN 路径取流 (适用于把播放流量走 CDN 的站点):
+# stream_cdn_path = true
+
+# 进度上报连续失败时降级为只发送结束事件, 而不是判定保活失败:
+# progress_fallback = true
+
 # 无法获取视频长度时, 依然允许播放 (默认最大播放 10 分钟左右, 可能播放超出实际长度):
 # allow_stream = true
 
@@ -58,6 +82,39 @@ time = [300, 600]
 # username = "marymurphy"
 # password = "!8OXJolmsd"
 # time = [300, 600]
+
+# ================================================================================
+# 本地 LLM 替代原作者云端认证 (可选, 与 skip_auth 配合使用)
+# 未配置本段时, 程序行为与上游一致, 全部走 @embykeeper_auth_bot
+# 详见: docs/guide/LLM-本地替代.md
+# ================================================================================
+
+# [llm]
+
+# 运行模式:
+#   auto   - 优先本地, 失败回退远端 (默认)
+#   local  - 只走本地, 禁止回退远端
+#   remote - 只走远端, 保持上游行为
+# mode = "auto"
+
+# OpenAI 兼容接口的 API Key 与地址:
+# api_key = "sk-xxxxxxxx"
+# base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+# 文本模型 (处理 /gpt 考核问答与智能回答) 与视觉模型 (处理看图选按钮、图片验证码):
+# model = "glm-4-flash"
+# vision_model = "glm-4v-flash"
+
+# 请求超时 (秒):
+# timeout = 60
+
+# 可选: 自行实现 captcha / wssocks 等本地能力的辅助脚本 (见 docs/guide/LLM-本地替代.md):
+# helper_command = "python /app/helper.py"
+# helper_timeout = 120
+
+# 无条件跳过各站点的 additional_auth 前置检查 (prime/super/captcha/ocr/pornemby_pack).
+# 仅跳过"认证检查"这一关; 真正需要验证码令牌的站点仍需 helper, 否则会在运行中失败.
+# skip_additional_auth = false
 
 # ================================================================================
 # Telegram 机器人签到相关设置

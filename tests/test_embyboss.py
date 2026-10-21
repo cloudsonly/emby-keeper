@@ -86,6 +86,18 @@ class FakeClient:
         self.send_message_calls = []
         self.send_message_times = []
         self.catch_reply_results = list(catch_reply_results or [])
+        self.handlers = []
+
+    async def add_handler(self, handler, group=0):
+        # 抢注流程会临时挂一个 MessageHandler 收集队列消息, Fake 只需记录以便断言.
+        self.handlers.append((handler, group))
+
+    async def remove_handler(self, handler, group=0):
+        for item in list(self.handlers):
+            if item == (handler, group):
+                self.handlers.remove(item)
+                return
+        raise ValueError("handler not found")
 
     @asynccontextmanager
     async def catch_reply(self, chat_id):
