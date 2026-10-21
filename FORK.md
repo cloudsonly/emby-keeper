@@ -109,7 +109,22 @@ password = "密码"
 | `interval_days` 区间配置完全失效 | `days[0] + (days[1] - days[0])` 恒等于 `days[1]`，`"<7,12>"` 永远取 12 天 | `random.randint(low, high)` |
 | pydantic v2 兼容性 | `__get_validators__`（v1 写法，v3 将移除） | `__get_pydantic_core_schema__` |
 
-### 5. 其它配套
+### 5. 新增 TLS 证书校验开关（参考 ignimutos lite 分支）
+
+原实现三处硬编码 `verify=False`（主会话、流媒体、跨域重定向后），既不能在需要时开启校验，
+也无法区分「站点自签证书」和「真的不该校验」。
+
+```toml
+[emby]
+verify = false          # 默认关闭, 保持上游行为; 设为 true 则校验证书
+
+[[emby.account]]
+# verify = false        # 账号级覆盖全局
+```
+
+统一由 `Emby.verify_ssl` 属性决定，账号级配置优先。
+
+### 6. 其它配套
 
 - `cli.py`：`streams` 预置 `None`，修 `-o`/`--once` 单次运行时的 `UnboundLocalError`；
   退出时改用 `_stop_notifier()` 统一 flush 并移除 handler
@@ -123,7 +138,7 @@ password = "密码"
 | 来源 | 内容 | 原因 |
 |---|---|---|
 | ignimutos | `emby/api.py` 拆分为 `transport`/`playback`/`keepalive`/`notification`/`errors` | 与 supermoon 的 `api.py` 重写直接冲突，且该 fork 落后上游 7 个提交（缺 Web 面板） |
-| ignimutos `lite` 分支 | `emby.verify`（SSL 校验开关）、凭据 scrypt+Fernet 加密缓存、`speed_limit` 限速 | 这些在 lite 分支（已删除 TG 全家），移植需额外适配；对自签证书站点有价值，可后续单独加 |
+| ignimutos `lite` 分支 | 凭据 scrypt+Fernet 加密缓存、`speed_limit` 限速 | 这些在 lite 分支（已删除 TG 全家），移植需额外适配；`emby.verify` 已单独采纳，其余可后续再加 |
 | Elykia093 | `_templ_ai.py` 的 AI 视觉接管 | aprpure 的 `llm.visual()` 已覆盖同类能力 |
 | Elykia093 | 单 YesCaptcha 的 `turnstile.py` | aprpure 的版本支持多 solver 轮换 + YesCaptcha，更强 |
 | Elykia093 | 无条件硬跳过认证（无开关） | 无法回退，且 captcha 类站点会从「初始化拒绝」变成「运行中失败」，更难排查 |
