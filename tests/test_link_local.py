@@ -174,3 +174,25 @@ def test_local_link_ocr_falls_back_to_helper_when_llm_raises():
         assert asyncio.run(local.ocr(b"img")) == "HELP"
     finally:
         link_local_module.OCRService = original
+
+
+def test_local_link_skip_additional_auth_bypasses_capability_check():
+    """开启 skip_additional_auth 后, 任何附加认证服务都应直接放行."""
+    config_module.config.llm = SimpleNamespace(api_key="test", skip_additional_auth=True)
+    local = LocalLink(make_client())
+
+    # captcha 通常需要 helper 才被声明支持, 此开关下应无条件放行
+    assert local.supports_service("captcha") is True
+    assert local.supports_service("wssocks") is True
+    assert asyncio.run(local.auth("captcha")) is True
+
+
+def test_local_link_skip_additional_auth_disabled_keeps_capability_mapping():
+    """关闭该开关时, 未声明的服务仍应被拒绝, 保持原有能力映射行为."""
+    config_module.config.llm = SimpleNamespace(api_key="test", skip_additional_auth=False)
+    local = LocalLink(make_client())
+
+    assert local.supports_service("captcha") is False
+    assert asyncio.run(local.auth("captcha")) is False
+    # 配了 LLM 时 prime / super / pornemby_pack 仍应放行
+    assert local.supports_service("prime") is True
