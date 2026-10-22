@@ -56,9 +56,19 @@ def test_noneed_is_also_terminal():
     asyncio.run(scenario())
 
 
-def test_timeout_error_is_oserror_subclass():
-    """asyncio.TimeoutError 属于 OSError, 所以 except 顺序必须是 TimeoutError 在前.
+def test_timeout_handler_precedes_oserror():
+    """超时必须在 OSError 之前捕获.
 
+    Python 3.11 起 asyncio.TimeoutError 成为 OSError 的子类 (3.10 及以前是独立类),
     顺序写反会让超时被当作"初始化错误"处理, 并打印无信息的空 traceback.
     """
-    assert issubclass(asyncio.TimeoutError, OSError)
+    import inspect
+    import re
+
+    src = inspect.getsource(BotCheckin.start)
+    timeout_match = re.search(r"except asyncio\.TimeoutError:", src)
+    oserror_match = re.search(r"except OSError as e:", src)
+
+    assert timeout_match is not None, "start() 缺少 TimeoutError 处理"
+    assert oserror_match is not None, "start() 缺少 OSError 处理"
+    assert timeout_match.start() < oserror_match.start(), "except 顺序错误: TimeoutError 必须在 OSError 之前"
