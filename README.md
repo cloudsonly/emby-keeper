@@ -150,6 +150,16 @@ password = "pass_a"
 
 注意 `checkiner_config` 是**整体替换**而非合并：一旦设置，该账号就不再继承全局 `[checkiner]` 的 `time_range` / `timeout` / `retries`，需要在这段里重写一遍。
 
+**需要多级菜单才能签到的机器人**（如 Ask Ash：先点「用户功能」，再点「数据存档」）：
+
+```toml
+[checkiner."templ_a<ashUniversal_Bot>"]
+name = "Ask Ash"
+bot_checkin_path = ["用户功能", "数据存档"]
+```
+
+`bot_checkin_path` 会按顺序点击按钮，最后一级视为签到按钮；不配置时仍按原来的「在同一条消息里直接找签到按钮」逻辑，找不到会报「账户错误」。
+
 **畸形站点**（按站点逐个开，不要一次全开）：
 
 ```toml

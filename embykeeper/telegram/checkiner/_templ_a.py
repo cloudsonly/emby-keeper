@@ -29,6 +29,7 @@ class TemplateACheckinConfig(BaseModel):
     bot_checkin_cmd: Optional[str] = None  # Bot 依次执行的签到命令
     bot_use_captcha: Optional[bool] = None  # 当 Bot 返回图片时, 识别验证码并调用 on_captcha
     bot_checkin_button: Union[str, List[str]] = None  # 签到按钮文本
+    bot_checkin_path: Union[str, List[str]] = None  # 依次点击的按钮文本, 用于需先进子菜单的机器人
     templ_panel_keywords: Union[str, List[str]] = None  # 面板关键词
     # fmt: on
 
@@ -38,6 +39,7 @@ class TemplateACheckin(BotCheckin):
     use_button_answer = True
     bot_checkin_cmd = "/start"
     bot_checkin_button = ["签到", "簽到"]
+    bot_checkin_path = None
     templ_panel_keywords = None
 
     async def init(self):
@@ -62,6 +64,7 @@ class TemplateACheckin(BotCheckin):
         self.bot_checkin_caption_pat = self.t_config.bot_checkin_caption_pat or self.bot_checkin_caption_pat
         self.bot_checkin_cmd = self.t_config.bot_checkin_cmd or self.bot_checkin_cmd
         self.bot_checkin_button = self.t_config.bot_checkin_button or self.bot_checkin_button
+        self.bot_checkin_path = self.t_config.bot_checkin_path or self.bot_checkin_path
         self.templ_panel_keywords = self.t_config.templ_panel_keywords or self.templ_panel_keywords
         self.bot_use_captcha = (
             self.t_config.bot_use_captcha
@@ -70,10 +73,49 @@ class TemplateACheckin(BotCheckin):
         )
 
         self.log = logger.bind(scheme="telechecker", name=self.name, username=self.client.me.full_name)
+        self._path_index = 0
+        return True
+
+    async def send_checkin(self, **kw):
+        # 每次重新发起签到都从头走按钮路径, 避免重试时路径已走完而卡住.
+        self._path_index = 0
+        return await super().send_checkin(**kw)
+
+    async def _advance_button_path(self, message: Message) -> bool:
+        """按 bot_checkin_path 依次点击按钮.
+
+        部分机器人需要先点一级菜单 (如 "用户功能") 才能看到签到按钮 (如 "数据存档"),
+        单次点击匹配不到就只会报 "账户错误". 配置路径后逐级点击, 最后一级视为签到按钮.
+        """
+        path = to_iterable(self.bot_checkin_path) if self.bot_checkin_path else []
+        if not path or not message.reply_markup:
+            return False
+        index = self._path_index
+        if index >= len(path):
+            return False
+        keys = [k.text for r in message.reply_markup.inline_keyboard for k in r]
+        target = path[index]
+        matched = next((k for k in keys if target in k), None)
+        if matched is None:
+            return False
+        self._path_index = index + 1
+        self.log.debug(f"点击菜单按钮 [{matched}] ({index + 1}/{len(path)}).")
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        try:
+            answer: BotCallbackAnswer = await message.click(matched)
+        except TimeoutError:
+            self.log.debug("点击菜单按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+            return True
+        except MessageIdInvalid:
+            return True
+        if self._path_index >= len(path):
+            await self.on_button_answer(answer)
         return True
 
     async def message_handler(self, client, message: Message):
         text = message.caption or message.text
+        if await self._advance_button_path(message):
+            return
         if (
             text
             and message.reply_markup
