@@ -29,7 +29,13 @@ from thefuzz import fuzz, process
 from embykeeper import __name__ as __product__
 from embykeeper.ocr import CharRange, OCRService
 from embykeeper.runinfo import RunContext
-from embykeeper.utils import show_exception, to_iterable, format_timedelta_human, AsyncCountPool
+from embykeeper.utils import (
+    AsyncCountPool,
+    format_timedelta_human,
+    show_exception,
+    to_iterable,
+    truncate_str,
+)
 from embykeeper.config import config
 from embykeeper.runinfo import RunStatus
 from embykeeper.telegram.pyrogram import Client
@@ -76,6 +82,8 @@ default_keywords = {
         "这道题",
         "答错",
         "重新生成",
+        "补全诗句",
+        "依次点击",
     ),
 }
 
@@ -83,6 +91,9 @@ default_keywords = {
 # 这类题面往往同时含 "完成" 等成功关键词 (如 "请完成下面这道题后签到"),
 # 只靠关键词会漏判, 因此额外用算式模式兜底.
 CHALLENGE_PATTERN = re.compile(r"\d+\s*[+\-*/×÷]\s*\d+\s*=")
+
+# 智能回答给出的点击指令, 一条回答里可以出现多个 (如 "依次点击补全诗句" 要点两下).
+CLICK_PATTERN = re.compile(r"\[CLICK\]\^(.+?)\^")
 
 
 class MessageType(Flag):
@@ -533,6 +544,10 @@ class BotCheckin(BaseBotCheckin):
         """分析传入消息的类型为验证码或文字."""
         if message.photo:
             if message.caption:
+                # 图片只是配图, 真正的验证在文字和按钮里 (如 "防機器签到验证: 请依次点击下方
+                # 按钮补全诗句"). 这类消息当验证码 OCR 只会识别失败并反复重试.
+                if self.is_challenge_text(message.caption):
+                    return MessageType.CAPTION
                 if self.bot_use_captcha:
                     if self.bot_checkin_caption_pat:
                         if re.search(self.bot_checkin_caption_pat, message.caption):
@@ -591,6 +606,14 @@ class BotCheckin(BaseBotCheckin):
         适用于机器人判错验证码后会补发新图的站点; 默认不处理.
         """
         return False
+
+    def _log_success_basis(self, text: str) -> None:
+        """成功但没解析出数字时, 把判定依据打出来.
+
+        "签到成功." 这种无数字的成功最可疑: 很可能命中的是按钮回调 toast 或
+        验证题面里的 "完成" 等词, 打一行原文便于事后排查误报.
+        """
+        self.log.info(f"判定成功依据: {truncate_str(text, 60)}")
 
     def is_challenge_text(self, text: str) -> bool:
         """判断是否为验证问题 (算术题 / 请答题), 而不是签到结果.
@@ -660,8 +683,10 @@ class BotCheckin(BaseBotCheckin):
                             self.log.info(f"[yellow]签到成功[/]: 当前/增加 {matches.group(0)} 分.")
                         else:
                             self.log.info(f"[yellow]签到成功[/].")
+                            self._log_success_basis(text)
                 else:
                     self.log.info(f"[yellow]签到成功[/].")
+                    self._log_success_basis(text)
                 await self.after_success()
                 await self.finish(RunStatus.SUCCESS, "签到成功")
         else:
@@ -693,8 +718,10 @@ class BotCheckin(BaseBotCheckin):
             )
             if buttons:
                 prompt += (
-                    f"你可选: {', '.join(button_specs)} 中的一个作为回答.\n"
+                    f"你可选: {', '.join(button_specs)} 作为回答.\n"
                     "形式为: [CLICK]^XXX^, 其中XXX为回答\n"
+                    "如果题目要求按顺序点击多个按钮 (如补全诗句、依次点击、按顺序点出答案), "
+                    "请按顺序输出多个 [CLICK]^XXX^, 例如: [CLICK]^丛^[CLICK]^在^\n"
                 )
             prompt += (
                 "如果您认为不应该进行任何操作, 请输出 [NO_RESP], 禁止输出其他内容.\n"
@@ -727,8 +754,8 @@ class BotCheckin(BaseBotCheckin):
                             return True
                     elif buttons and "[CLICK]" in answer:
                         self.log.debug(f"当前按钮: {', '.join(button_specs)}")
-                        answer_content = re.search(r"\[CLICK\]\^(.+?)\^", answer)
-                        if not answer_content:
+                        targets = CLICK_PATTERN.findall(answer)
+                        if not targets:
                             if unexpected:
                                 self.log.info(f"智能回答失败, 为了避免风险签到器将停止.")
                                 await self.fail()
@@ -736,24 +763,39 @@ class BotCheckin(BaseBotCheckin):
                             else:
                                 self.log.warning(f"智能回答失败.")
                                 return False
-                        answer_content = answer_content.group(1)
-                        b, s = process.extractOne(answer_content, buttons, scorer=fuzz.partial_ratio)
-                        if s < 70:
+                        # 先把所有目标都匹配到按钮上, 再按顺序点击.
+                        # 部分机器人要求先点对前一个才允许点下一个, 中途匹配失败时整体重来.
+                        matched_buttons = []
+                        for target in targets:
+                            b, s = process.extractOne(target, buttons, scorer=fuzz.partial_ratio)
+                            if s < 70:
+                                matched_buttons = None
+                                break
+                            matched_buttons.append(b)
+                        if not matched_buttons:
                             self.log.info(f"找不到对应回答的按钮, 正在重试.")
                             await asyncio.sleep(3)
                             continue
-                        else:
+                        for index, b in enumerate(matched_buttons):
+                            if index:
+                                # 多级点击之间留出间隔, 避免机器人把连续点击判定为脚本.
+                                await asyncio.sleep(random.uniform(0.8, 2.0))
                             try:
                                 await message.click(b)
                             except (TimeoutError, MessageIdInvalid):
                                 pass
-                            if unexpected:
-                                self.log.warning(f'智能回答点击了按钮 "{b}", 为了避免风险签到器将停止.')
-                                await self.fail()
-                                return False
-                            else:
-                                self.log.info(f'智能回答点击了按钮 "{b}".')
-                                return True
+                            if len(matched_buttons) > 1:
+                                self.log.info(
+                                    f'智能回答点击了按钮 "{b}" ({index + 1}/{len(matched_buttons)}).'
+                                )
+                        if len(matched_buttons) == 1:
+                            self.log.info(f'智能回答点击了按钮 "{matched_buttons[0]}".')
+                        if unexpected:
+                            self.log.warning(f"智能回答已点击按钮, 为了避免风险签到器将停止.")
+                            await self.fail()
+                            return False
+                        else:
+                            return True
                     elif "[SEND]" in answer:
                         answer_content = re.search(r"\[SEND\]\^(.+?)\^", answer)
                         if not answer_content:

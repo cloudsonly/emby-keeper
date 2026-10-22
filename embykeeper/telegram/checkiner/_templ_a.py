@@ -142,6 +142,7 @@ class TemplateACheckin(BotCheckin):
         if (
             text
             and message.reply_markup
+            and not self.is_challenge_text(text)
             and (
                 (
                     self.templ_panel_keywords
@@ -150,7 +151,8 @@ class TemplateACheckin(BotCheckin):
                 or (getattr(message, "is_first_response", False) and not message.edit_date)
             )
         ):
-            keys = [k.text for r in message.reply_markup.inline_keyboard for k in r]
+            inline = getattr(message.reply_markup, "inline_keyboard", None) or []
+            keys = [k.text for r in inline for k in r]
             for k in keys:
                 if any(btn in k for btn in self.bot_checkin_button):
                     await asyncio.sleep(random.uniform(0.5, 1.5))

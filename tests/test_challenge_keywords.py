@@ -11,7 +11,7 @@ import pytest
 from loguru import logger
 
 from embykeeper.runinfo import RunContext, RunStatus
-from embykeeper.telegram.checkiner._base import BotCheckin, default_keywords
+from embykeeper.telegram.checkiner._base import BotCheckin, MessageType, default_keywords
 from embykeeper.telegram.checkiner._templ_a import TemplateACheckinConfig
 
 
@@ -126,3 +126,46 @@ def test_math_expression_detected_without_keywords():
 def test_plain_success_with_numbers_is_not_challenge():
     inst = make_checkin()
     assert inst.is_challenge_text("签到成功: 获得奖励 5, 当前余额 347.") is False
+
+
+NIUBI_PROMPT = """🌸 防機器签到验证 🌸
+
+请依次点击下方按钮补全诗句：
+
+忆对中秋丹桂＿。 花＿杯中。 月在杯中。
+
+出自：辛弃疾《一剪梅·中秋元月》"""
+
+
+def test_niubi_poem_prompt_is_a_challenge():
+    inst = make_checkin()
+    assert inst.is_challenge_text(NIUBI_PROMPT) is True
+
+
+def test_niubi_poem_prompt_is_not_counted_as_success():
+    """旧实现里这条消息不含任何成功关键词, 会走 "异常返回" 分支并直接判失败."""
+    inst = make_checkin()
+
+    async def scenario():
+        await inst.on_text(None, NIUBI_PROMPT)
+
+    asyncio.run(scenario())
+    assert inst.gpt_calls == [False]
+    assert inst.ctx.status != RunStatus.SUCCESS
+
+
+class FakePhotoMessage:
+    def __init__(self, caption):
+        self.photo = object()
+        self.caption = caption
+        self.text = None
+
+
+def test_photo_with_challenge_caption_is_not_ocrd():
+    """题目常以 "配图 + 文字按钮" 的形式发来, 图片只是装饰, 当验证码 OCR 只会白跑重试."""
+    inst = make_checkin()
+    inst.bot_use_captcha = True
+    inst.bot_checkin_caption_pat = None
+    assert inst.message_type(FakePhotoMessage(NIUBI_PROMPT)) == MessageType.CAPTION
+    # 普通验证码图片仍然走 OCR
+    assert inst.message_type(FakePhotoMessage("1234")) == MessageType.CAPTCHA
