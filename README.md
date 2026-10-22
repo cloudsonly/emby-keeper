@@ -116,6 +116,16 @@ skip_auth = true
 
 ## 进阶配置
 
+**网页面板**（`EK_WEBPASS` 非空即启动，容器内固定监听 **1818**）：
+
+```bash
+docker run -d --name embykeeper -v $(pwd)/app:/app --net=host \
+  -e EK_WEBPASS='你的密码' --restart unless-stopped \
+  ghcr.io/cloudsonly/emby-keeper:latest
+```
+
+访问 `http://服务器IP:1818`。本镜像只有 `EK_WEBPASS`，没有 `EK_TOKEN`；面板与 `-i` 向导互斥，首次登录 Telegram 请先不带密码跑一次 `-i`。
+
 **网页签到**（该站默认 `__ignore__`，必须显式加入）：
 
 ```toml
