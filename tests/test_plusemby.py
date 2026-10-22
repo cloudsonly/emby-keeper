@@ -21,6 +21,7 @@ from embykeeper.telegram.checkiner.plusemby import (
     summarize_results,
     verification_required,
     verification_site_key,
+    verification_type,
 )
 
 
@@ -72,6 +73,22 @@ def test_verification_site_key_extraction():
     assert verification_site_key(settings, "login") == "key"
     assert verification_site_key(settings, "missing") == ""
     assert verification_site_key(None, "login") == ""
+
+
+def test_verification_site_key_accepts_alternate_field_names():
+    # 不同版本面板字段名不一致, 都要能取到
+    for field in ("siteKey", "site_key", "sitekey"):
+        settings = {"checkin": {"enabled": True, "type": "turnstile", field: "k1"}}
+        assert verification_site_key(settings, "checkin") == "k1"
+    nested = {"checkin": {"enabled": True, "type": "turnstile", "turnstile": {"siteKey": "k2"}}}
+    assert verification_site_key(nested, "checkin") == "k2"
+
+
+def test_verification_type_normalized():
+    assert verification_type({"login": {"type": "Turnstile"}}, "login") == "turnstile"
+    assert verification_type({"login": {"type": "recaptcha"}}, "login") == "recaptcha"
+    assert verification_type({"login": {}}, "login") == ""
+    assert verification_type(None, "login") == ""
 
 
 def test_classify_status_response():

@@ -64,8 +64,24 @@ default_keywords = {
     "success": ("成功", "通过", "完成", "获得"),
     # 验证问题: 这类消息常带 "签到成功" 字样 (如 "签到成功, 请回答: 5+5=?"),
     # 直接按成功关键词判定会漏答, 因此优先交给智能回答处理.
-    "challenge": ("请回答", "请计算", "请输入答案", "请选择正确答案", "回答下列", "请作答"),
+    "challenge": (
+        "请回答",
+        "请计算",
+        "请输入答案",
+        "请选择正确答案",
+        "回答下列",
+        "请作答",
+        "请完成下面",
+        "这道题",
+        "答错",
+        "重新生成",
+    ),
 }
+
+# 算术题形式的验证: "17 - 15 = ?" / "5+5=?".
+# 这类题面往往同时含 "完成" 等成功关键词 (如 "请完成下面这道题后签到"),
+# 只靠关键词会漏判, 因此额外用算式模式兜底.
+CHALLENGE_PATTERN = re.compile(r"\d+\s*[+\-*/×÷]\s*\d+\s*=")
 
 
 class MessageType(Flag):
@@ -575,6 +591,19 @@ class BotCheckin(BaseBotCheckin):
         """
         return False
 
+    def is_challenge_text(self, text: str) -> bool:
+        """判断是否为验证问题 (算术题 / 请答题), 而不是签到结果.
+
+        先看关键词, 再看算式模式. 后者能覆盖 "请完成下面这道题后签到: 17 - 15 = ?"
+        这类同时含 "完成" 的题面 —— 否则会被当成签到成功而漏答.
+        """
+        if not text:
+            return False
+        keywords = to_iterable(self.bot_challenge_keywords) or default_keywords["challenge"]
+        if any(s in text for s in keywords):
+            return True
+        return bool(CHALLENGE_PATTERN.search(text))
+
     async def on_text(self, message: Message, text: str):
         """接收非验证码消息时, 检测关键词并确认签到成功或失败, 发送用户提示."""
         if not text:
@@ -586,11 +615,9 @@ class BotCheckin(BaseBotCheckin):
                 return
         if any(s in text for s in to_iterable(self.bot_text_ignore)):
             pass
-        elif any(
-            s in text for s in to_iterable(self.bot_challenge_keywords) or default_keywords["challenge"]
-        ):
+        elif self.is_challenge_text(text):
             # 例: MICU 点签到后要答算术题, EmbyYing_2 要输入答案发送.
-            # 这类消息往往也含 "签到成功", 若按成功处理就会漏答并误报成功.
+            # 这类消息往往也含 "签到成功" / "请完成" 等字样, 若按成功处理就会漏答并误报成功.
             self.log.info("检测到验证问题, 正在尝试智能回答.")
             await self.gpt_handle_message(message, unexpected=False)
         elif any(

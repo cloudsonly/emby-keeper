@@ -95,3 +95,34 @@ def test_custom_challenge_keywords_override_builtin():
 def test_templ_a_config_accepts_challenge_keywords():
     cfg = TemplateACheckinConfig.model_validate({"bot_challenge_keywords": ["请回答"]})
     assert cfg.bot_challenge_keywords == ["请回答"]
+
+
+MICU_PROMPT = """【🎯 每日签到
+请完成下面这道题后签到：
+17 - 15 = ?
+答错会重新生成一题。】"""
+
+
+def test_micu_prompt_is_not_treated_as_success():
+    """MICU 题面含 "完成" (成功关键词) 且措辞不含 "请回答", 必须靠算式模式识别."""
+    inst = make_checkin()
+
+    async def scenario():
+        await inst.on_text(None, MICU_PROMPT)
+
+    asyncio.run(scenario())
+    assert inst.gpt_calls == [False]
+    assert inst.ctx.status != RunStatus.SUCCESS
+
+
+def test_math_expression_detected_without_keywords():
+    inst = make_checkin()
+    inst.bot_challenge_keywords = ["绝不出现的词"]
+    assert inst.is_challenge_text("7*8=?") is True
+    assert inst.is_challenge_text("12 ÷ 3 = ?") is True
+    assert inst.is_challenge_text("签到成功, +5 分 -> 15 分") is False
+
+
+def test_plain_success_with_numbers_is_not_challenge():
+    inst = make_checkin()
+    assert inst.is_challenge_text("签到成功: 获得奖励 5, 当前余额 347.") is False

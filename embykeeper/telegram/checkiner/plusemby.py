@@ -59,14 +59,38 @@ def verification_required(settings: Any, action: str) -> bool:
     return bool(action_settings.get("enabled") and verification_type != "none")
 
 
-def verification_site_key(settings: Any, action: str) -> str:
-    """取出该动作对应的 Turnstile siteKey, 缺失时返回空串."""
+def verification_type(settings: Any, action: str) -> str:
+    """取出该动作使用的验证类型 (turnstile / recaptcha / hcaptcha / none)."""
     if not isinstance(settings, dict):
         return ""
     action_settings = settings.get(action)
     if not isinstance(action_settings, dict):
         return ""
-    return str(action_settings.get("siteKey") or "").strip()
+    return str(action_settings.get("type") or "").strip().lower()
+
+
+def verification_site_key(settings: Any, action: str) -> str:
+    """取出该动作对应的 Turnstile siteKey, 缺失时返回空串.
+
+    不同版本的結束バンド面板字段名不一致, 这里兼容 siteKey / site_key / sitekey,
+    以及嵌套在 turnstile 子对象里的写法.
+    """
+    if not isinstance(settings, dict):
+        return ""
+    action_settings = settings.get(action)
+    if not isinstance(action_settings, dict):
+        return ""
+    for key in ("siteKey", "site_key", "sitekey"):
+        value = action_settings.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = action_settings.get("turnstile")
+    if isinstance(nested, dict):
+        for key in ("siteKey", "site_key", "sitekey"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
 
 
 def classify_status_response(status_code: int, payload: Any) -> tuple[RunStatus, str]:
@@ -232,9 +256,14 @@ class PlusembyCheckin(BaseBotCheckin):
             return configured
         if not verification_required(settings, action):
             return ""
+        vtype = verification_type(settings, action)
+        if vtype and vtype != "turnstile":
+            self.log.warning(f"站点要求 {action} 使用 {vtype} 验证, 当前仅支持 Turnstile, 无法求解.")
+            return ""
         site_key = verification_site_key(settings, action)
         if not site_key:
             self.log.warning(f"站点要求 {action} 验证但未提供 siteKey, 无法求解.")
+            self.log.debug(f"站点验证配置 (便于排查字段名): {settings}")
             return ""
         try:
             service = self._turnstile_service()
