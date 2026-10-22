@@ -10,7 +10,7 @@ from curl_cffi.requests import AsyncSession, RequestsError
 
 from embykeeper.runinfo import RunStatus
 from embykeeper.turnstile import TurnstileService
-from embykeeper.utils import get_proxy_str, truncate_str
+from embykeeper.utils import get_proxy_str, show_exception, truncate_str
 
 from ._base import BaseBotCheckin
 
@@ -111,28 +111,78 @@ def classify_checkin_response(status_code: int, payload: Any) -> tuple[RunStatus
     return RunStatus.FAIL, extract_message(payload, "签到失败")
 
 
+def summarize_results(results: list[tuple[str, RunStatus, str]]) -> tuple[RunStatus, str]:
+    """聚合多站点签到结果.
+
+    任一站点失败即整体失败 (否则部分站点静默失败不会被通知暴露);
+    全部无需签到时为 NONEED; 否则只要有站点成功即为 SUCCESS.
+    """
+    if len(results) == 1:
+        _, status, message = results[0]
+        return status, message
+
+    total = len(results)
+    failed = [(label, message) for label, status, message in results if status == RunStatus.FAIL]
+    succeeded = [(label, message) for label, status, message in results if status == RunStatus.SUCCESS]
+    if failed:
+        detail = "; ".join(f"{label}{message}" for label, message in failed)
+        return RunStatus.FAIL, f"{total - len(failed)}/{total} 成功, 失败: {detail}"
+    if succeeded:
+        detail = "; ".join(f"{label}{message}" for label, message in succeeded)
+        return RunStatus.SUCCESS, f"{len(succeeded)}/{total} 签到成功: {detail}"
+    return RunStatus.NONEED, f"{total} 个站点今日均已签到"
+
+
 class PlusembyCheckin(BaseBotCheckin):
     name = "結束バンド"
 
     @property
+    def entry(self) -> dict:
+        """当前正在处理的站点配置.
+
+        单站点时即 self.config; 多站点时由 start() 逐项切换为 accounts 中的元素.
+        """
+        entry = getattr(self, "_entry", None)
+        return entry if isinstance(entry, dict) else self.config
+
+    def entries(self) -> list[dict]:
+        """站点配置列表.
+
+        支持在一份配置内跑多个 plusemby 站点:
+            [checkiner.plusemby]
+            [[checkiner.plusemby.accounts]]
+            url = "https://a.example.com"
+            username = "user_a"
+            password = "pass_a"
+
+        未配置 accounts (或其中没有合法条目) 时退化为单站点, 沿用顶层字段.
+        """
+        accounts = self.config.get("accounts")
+        if isinstance(accounts, list):
+            valid = [account for account in accounts if isinstance(account, dict)]
+            if valid:
+                return valid
+        return [self.config]
+
+    @property
     def base_url(self) -> str:
-        return normalize_base_url(self.config.get("url"))
+        return normalize_base_url(self.entry.get("url"))
 
     @property
     def username(self) -> str:
-        return str(self.config.get("username") or "").strip()
+        return str(self.entry.get("username") or "").strip()
 
     @property
     def password(self) -> str:
-        return str(self.config.get("password") or "")
+        return str(self.entry.get("password") or "")
 
     @property
     def access_token(self) -> str:
-        return str(self.config.get("access_token") or "").strip()
+        return str(self.entry.get("access_token") or "").strip()
 
     @property
     def use_proxy(self) -> bool:
-        return self.config.get("use_proxy", False) is True
+        return self.entry.get("use_proxy", False) is True
 
     def api_url(self, path: str) -> str:
         return urljoin(f"{self.base_url}/", path.lstrip("/"))
@@ -143,8 +193,8 @@ class PlusembyCheckin(BaseBotCheckin):
             "Origin": self.base_url,
             "Referer": self.api_url("/login"),
         }
-        if self.config.get("useragent"):
-            headers["User-Agent"] = str(self.config["useragent"])
+        if self.entry.get("useragent"):
+            headers["User-Agent"] = str(self.entry["useragent"])
         return headers
 
     async def request_json(self, session: AsyncSession, method: str, path: str, **kwargs) -> tuple[int, Any]:
@@ -164,7 +214,7 @@ class PlusembyCheckin(BaseBotCheckin):
         return payload
 
     def configured_verification_token(self, action: str) -> str:
-        return str(self.config.get(f"{action}_verification_token") or "").strip()
+        return str(self.entry.get(f"{action}_verification_token") or "").strip()
 
     def _turnstile_service(self) -> TurnstileService:
         # TurnstileService 自身会按 构造参数 > 环境变量 > config.toml [turnstile] 解析,
@@ -318,12 +368,31 @@ class PlusembyCheckin(BaseBotCheckin):
             self.log.debug("访问令牌已失效, 重新登录后复查签到状态.")
             token, settings = "", None
 
-    async def start(self):
-        from embykeeper.config import config as global_config
+    def _entry_label(self, index: int, total: int) -> str:
+        """多站点时为日志加站点前缀, 单站点时保持原输出不变."""
+        if total == 1:
+            return ""
+        return f"[{index}/{total} {self.base_url}] "
 
-        self.ctx.start(RunStatus.INITIALIZING)
-        self.ctx.status = RunStatus.RUNNING
+    def _log_result(self, label: str, status: RunStatus, message: str) -> None:
+        if status == RunStatus.SUCCESS:
+            self.log.info(f"{label}[yellow]签到成功[/]: {truncate_str(message, 80)}")
+        elif status == RunStatus.NONEED:
+            self.log.info(f"{label}{message}.")
+        else:
+            self.log.warning(f"{label}签到失败: {truncate_str(message, 80)}")
 
+    def _log_summary(self, status: RunStatus, message: str) -> None:
+        text = truncate_str(message, 160)
+        if status == RunStatus.SUCCESS:
+            self.log.info(f"[yellow]多站点签到汇总[/]: {text}")
+        elif status == RunStatus.NONEED:
+            self.log.info(f"多站点签到汇总: {text}.")
+        else:
+            self.log.warning(f"[red]多站点签到汇总[/]: {text}")
+
+    async def _run_single(self, global_config, label: str) -> tuple[RunStatus, str]:
+        """对当前 self.entry 执行一次完整签到流程."""
         api_proxy = get_proxy_str(global_config.proxy, curl=True) if self.use_proxy else None
         try:
             async with (
@@ -336,21 +405,41 @@ class PlusembyCheckin(BaseBotCheckin):
                     headers=self.client_headers(),
                 ) as session,
             ):
-                status, message = await self.run_api_flow(session)
+                return await self.run_api_flow(session)
         except TimeoutError:
-            self.log.warning("签到超过总超时时间, 已停止当前请求和验证码求解.")
-            return self.ctx.finish(RunStatus.FAIL, "签到超时")
+            # TimeoutError 在 3.11+ 是 OSError 子类, 必须排在 OSError 之前.
+            self.log.warning(f"{label}签到超过总超时时间, 已停止当前请求和验证码求解.")
+            return RunStatus.FAIL, "签到超时"
         except (RequestsError, OSError) as error:
-            self.log.warning(f"无法连接到結束バンド页面或接口 ({error.__class__.__name__}).")
-            return self.ctx.finish(RunStatus.FAIL, "网络错误")
+            self.log.warning(f"{label}无法连接到結束バンド页面或接口 ({error.__class__.__name__}).")
+            return RunStatus.FAIL, "网络错误"
         except RuntimeError as error:
             # get_verification_settings 以异常表达 "安全验证拦截/无法读取配置", 转为具体的失败原因
-            self.log.warning(f"签到失败: {truncate_str(str(error), 80)}")
-            return self.ctx.finish(RunStatus.FAIL, str(error))
-        if status == RunStatus.SUCCESS:
-            self.log.info(f"[yellow]签到成功[/]: {truncate_str(message, 80)}")
-        elif status == RunStatus.NONEED:
-            self.log.info(f"{message}.")
-        else:
-            self.log.warning(f"签到失败: {truncate_str(message, 80)}")
+            self.log.warning(f"{label}签到失败: {truncate_str(str(error), 80)}")
+            return RunStatus.FAIL, str(error)
+        except Exception as error:
+            # 单站点异常不应中断其余站点, 否则多站点配置下会全部跳过.
+            self.log.warning(f"{label}签到异常, 已跳过该站点.")
+            show_exception(error, regular=False)
+            return RunStatus.FAIL, "异常错误"
+
+    async def start(self):
+        from embykeeper.config import config as global_config
+
+        self.ctx.start(RunStatus.INITIALIZING)
+        self.ctx.status = RunStatus.RUNNING
+
+        entries = self.entries()
+        total = len(entries)
+        results: list[tuple[str, RunStatus, str]] = []
+        for index, entry in enumerate(entries, 1):
+            self._entry = entry
+            label = self._entry_label(index, total)
+            status, message = await self._run_single(global_config, label)
+            self._log_result(label, status, message)
+            results.append((label, status, message))
+
+        status, message = summarize_results(results)
+        if total > 1:
+            self._log_summary(status, message)
         return self.ctx.finish(status, message)
