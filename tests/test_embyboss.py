@@ -89,10 +89,30 @@ class FakeClient:
         self.handlers = []
 
     async def add_handler(self, handler, group=0):
-        # 抢注流程会临时挂一个 MessageHandler 收集队列消息, Fake 只需记录以便断言.
+        # 抢注流程会临时挂一个 MessageHandler 收集队列消息.
+        # 每次挂载对应一次 _catch_reply_queue, 因此只喂入一条预置消息.
         self.handlers.append((handler, group))
+        callback = getattr(handler, "callback", None)
+        if callback is None or not self.catch_reply_results:
+            return
+
+        item = self.catch_reply_results.pop(0)
+
+        async def feed():
+            if isinstance(item, DelayedReply):
+                await asyncio.sleep(item.delay)
+                message = item.message
+            else:
+                message = item
+            if message is not None:
+                await callback(self, message)
+
+        self._feed_task = asyncio.create_task(feed())
 
     async def remove_handler(self, handler, group=0):
+        feed_task = getattr(self, "_feed_task", None)
+        if feed_task is not None and not feed_task.done():
+            feed_task.cancel()
         for item in list(self.handlers):
             if item == (handler, group):
                 self.handlers.remove(item)
@@ -143,8 +163,9 @@ class FakePanel:
         self.answer = answer
         self.click_calls = []
 
-    async def click(self, button_text):
+    async def click(self, button_text, timeout=None):
         self.click_calls.append(button_text)
+        self.last_timeout = timeout
         return self.answer
 
 
@@ -171,7 +192,8 @@ def make_waiting_message(chat_id: int = 1000):
 
 
 def configure_fast_credential_retries(register):
-    register.credential_reply_timeout = 0.02
+    # 总预算需覆盖"至少一轮空响应 + 一轮成功响应", 否则在慢机器上第二轮尚未开始就已超时.
+    register.credential_reply_timeout = 1.0
     register.credential_burst_reply_timeout = 0.005
     register.credential_resend_delay = 0
 
@@ -333,35 +355,20 @@ def test_attempt_resends_credentials_on_three_second_round_cadence():
 
 
 def test_attempt_uses_callback_prompt_when_no_followup_message():
-    import embykeeper.telegram.embyboss as embyboss_module
+    # 回复队列为空时, 进入注册状态的信号来自点击按钮返回的回调文案.
+    client = FakeClient(
+        catch_reply_results=[
+            None,
+            make_message(
+                "🆗 已进入处理\n\n用户名：**purejam**  安全码：**1234** \n\n__正在为您初始化账户，更新用户策略__......"
+            ),
+        ],
+        wait_edit_result=make_message("创建用户成功"),
+    )
+    register = EmbybossRegister(cast(Any, client), FakeLogger(), "purejam", "1234", click_delay=(0, 0))
+    panel = FakePanel(SimpleNamespace(message="您已进入注册状态", alert=True), chat_id=2468)
 
-    original_wait_for = embyboss_module.asyncio.wait_for
-    call_count = 0
+    result = asyncio.run(register._attempt_with_panel(panel))
 
-    async def first_timeout_then_continue(awaitable, timeout):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            raise asyncio.TimeoutError
-        return await original_wait_for(awaitable, timeout)
-
-    embyboss_module.asyncio.wait_for = first_timeout_then_continue
-    try:
-        client = FakeClient(
-            catch_reply_results=[
-                None,
-                make_message(
-                    "🆗 已进入处理\n\n用户名：**purejam**  安全码：**1234** \n\n__正在为您初始化账户，更新用户策略__......"
-                ),
-            ],
-            wait_edit_result=make_message("创建用户成功"),
-        )
-        register = EmbybossRegister(cast(Any, client), FakeLogger(), "purejam", "1234", click_delay=(0, 0))
-        panel = FakePanel(SimpleNamespace(message="您已进入注册状态", alert=True), chat_id=2468)
-
-        result = asyncio.run(register._attempt_with_panel(panel))
-
-        assert result is True
-        assert client.send_message_calls == [(2468, "purejam 1234")] * 3
-    finally:
-        embyboss_module.asyncio.wait_for = original_wait_for
+    assert result is True
+    assert client.send_message_calls == [(2468, "purejam 1234")] * 3

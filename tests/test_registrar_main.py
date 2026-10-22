@@ -309,29 +309,20 @@ def make_client():
     return SimpleNamespace(me=SimpleNamespace(full_name="Tester"), stop_handlers=[])
 
 
-def test_handle_config_change_accepts_schedule_account_tuple():
+def test_handle_config_change_schedules_enabled_accounts():
     account = make_account()
-    fake_config = FakeConfig(accounts=[account])
+    disabled = make_account(phone="2000", registrar=False)
+    fake_config = FakeConfig(accounts=[account, disabled])
     original_config = registrar_main_module.config
     registrar_main_module.config = fake_config
     try:
+        manager = RegisterManager()
+        scheduled = []
+        manager.schedule_account = lambda acc: scheduled.append(acc.phone) or True
 
-        async def scenario():
-            manager = RegisterManager()
-            manager._pool = RecordingPool()
-            scheduler = FakeScheduler(register_key="1000.templ_a<Bot>.timed.0")
-            task = FakeTask("interval-task")
-            manager.schedule_account = lambda _: ([scheduler], [task])
+        manager._handle_config_change(None, None)
 
-            manager._handle_config_change(None, None)
-            await asyncio.sleep(0)
-
-            assert scheduler.calls == 1
-            assert len(manager._pool.added) == 2
-            assert manager._pool.added[1][1] == "interval-task"
-            manager._pool.close()
-
-        asyncio.run(scenario())
+        assert scheduled == ["1000"]
     finally:
         registrar_main_module.config = original_config
 
@@ -354,33 +345,23 @@ def test_handle_config_change_stops_accounts_found_in_task_keys():
         registrar_main_module.config = original_config
 
 
-def test_handle_account_change_accepts_schedule_account_tuple():
+def test_handle_account_change_schedules_added_accounts():
     added_account = make_account(phone="1001")
     removed_account = make_account(phone="2002")
     fake_config = FakeConfig(accounts=[])
     original_config = registrar_main_module.config
     registrar_main_module.config = fake_config
     try:
+        manager = RegisterManager()
+        stopped = []
+        scheduled = []
+        manager.stop_account = lambda phone: stopped.append(phone)
+        manager.schedule_account = lambda acc: scheduled.append(acc.phone) or True
 
-        async def scenario():
-            manager = RegisterManager()
-            manager._pool = RecordingPool()
-            scheduler = FakeScheduler(register_key="1001.templ_a<Bot>.timed.0")
-            task = FakeTask("added-task")
-            stopped = []
-            manager.stop_account = lambda phone: stopped.append(phone)
-            manager.schedule_account = lambda _: ([scheduler], [task])
+        manager._handle_account_change([added_account], [removed_account])
 
-            manager._handle_account_change([added_account], [removed_account])
-            await asyncio.sleep(0)
-
-            assert stopped == ["2002"]
-            assert scheduler.calls == 1
-            assert len(manager._pool.added) == 2
-            assert manager._pool.added[1][1] == "added-task"
-            manager._pool.close()
-
-        asyncio.run(scenario())
+        assert stopped == ["2002"]
+        assert scheduled == ["1001"]
     finally:
         registrar_main_module.config = original_config
 
@@ -395,10 +376,7 @@ def test_schedule_account_clears_existing_site_tasks_before_rescheduling():
         manager._tasks["1000.templ_a<Bot>"] = stale_task
         manager.get_sites_for_account = lambda _: []
 
-        schedulers, tasks = manager.schedule_account(make_account(phone="1000"))
-
-        assert schedulers == []
-        assert tasks == []
+        assert manager.schedule_account(make_account(phone="1000")) is False
         assert stale_task.cancel_called is True
         assert manager._tasks == {}
     finally:
@@ -426,11 +404,10 @@ def test_schedule_account_uses_account_specific_registrar_config():
             lambda account, site_name, site_config: captured_site_configs.append(site_config) or FakeTask()
         )
 
-        _, tasks = manager.schedule_account(
-            make_account(phone="1000", registrar_config=account_registrar_config)
+        assert (
+            manager.schedule_account(make_account(phone="1000", registrar_config=account_registrar_config))
+            is True
         )
-
-        assert len(tasks) == 1
         assert captured_site_configs == [{"interval_minutes": 5}]
     finally:
         registrar_main_module.config = original_config
@@ -446,24 +423,35 @@ def test_schedule_account_treats_times_as_one_random_daily_window():
     original_get_cls = registrar_main_module.get_cls
     registrar_main_module.config = fake_config
     try:
-        manager = RegisterManager()
-        manager.get_sites_for_account = lambda _: ["templ_a<Bot>"]
 
-        class FakeRegistrar:
-            templ_name = "templ_a<Bot>"
+        async def scenario():
+            manager = RegisterManager()
+            manager.get_sites_for_account = lambda _: ["templ_a<Bot>"]
 
-        registrar_main_module.extract = lambda classes: [FakeRegistrar]
-        registrar_main_module.get_cls = lambda *args, **kwargs: [FakeRegistrar]
+            class FakeRegistrar:
+                templ_name = "templ_a<Bot>"
 
-        schedulers, tasks = manager.schedule_account(
-            make_account(phone="1000", registrar_config=account_registrar_config)
-        )
+            registrar_main_module.extract = lambda classes: [FakeRegistrar]
+            registrar_main_module.get_cls = lambda *args, **kwargs: [FakeRegistrar]
 
-        assert tasks == []
-        assert len(schedulers) == 1
-        assert schedulers[0].start_time.strftime("%H:%M") == "09:00"
-        assert schedulers[0].end_time.strftime("%H:%M") == "21:00"
-        assert set(manager._schedulers.keys()) == {"1000.templ_a<Bot>"}
+            assert (
+                manager.schedule_account(
+                    make_account(phone="1000", registrar_config=account_registrar_config)
+                )
+                is True
+            )
+
+            assert manager._tasks == {}
+            key = "1000.templ_a<Bot>"
+            assert set(manager._schedulers.keys()) == {key}
+            scheduler = manager._schedulers[key]
+            assert scheduler.start_time.strftime("%H:%M") == "09:00"
+            assert scheduler.end_time.strftime("%H:%M") == "21:00"
+
+            manager.stop_account("1000")
+            await asyncio.sleep(0)
+
+        asyncio.run(scenario())
     finally:
         registrar_main_module.config = original_config
         registrar_main_module.extract = original_extract
@@ -487,7 +475,6 @@ def test_stop_account_cancels_started_timed_scheduler_tasks():
 
     async def scenario():
         manager = RegisterManager()
-        manager._pool = RecordingPool()
         manager.get_sites_for_account = lambda _: ["templ_a<Bot>"]
 
         class FakeRegistrar:
@@ -497,20 +484,22 @@ def test_stop_account_cancels_started_timed_scheduler_tasks():
         registrar_main_module.get_cls = lambda *args, **kwargs: [FakeRegistrar]
         registrar_main_module.Scheduler.from_str = fake_from_str
 
-        manager._register_account_schedule(
-            make_account(phone="1000", registrar_config=account_registrar_config)
+        assert (
+            manager.schedule_account(
+                make_account(phone="1000", registrar_config=account_registrar_config)
+            )
+            is True
         )
         await asyncio.sleep(0)
 
-        assert set(manager._tasks.keys()) == {"1000.templ_a<Bot>"}
+        assert set(manager._schedulers.keys()) == {"1000.templ_a<Bot>"}
 
         manager.stop_account("1000")
         await asyncio.sleep(0)
 
-        assert manager._tasks == {}
+        assert manager._schedulers == {}
         assert len(pending_schedulers) == 1
         assert pending_schedulers[0].cancelled is True
-        manager._pool.close()
 
     try:
         asyncio.run(scenario())
