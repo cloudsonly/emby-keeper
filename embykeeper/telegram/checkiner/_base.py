@@ -359,12 +359,14 @@ class BotCheckin(BaseBotCheckin):
                                 self.log.debug(f"[gray50]设为已读失败: {ident}[/]")
                             except FloodWait:
                                 self.log.debug(f"[gray50]设为已读因访问超限而失败: {ident}[/]")
+            except asyncio.TimeoutError:
+                # Python 3.11 起 asyncio.TimeoutError 是 OSError 的子类, 必须放在 OSError 之前捕获,
+                # 否则超时会被误判为"初始化错误", 并打印一段没有任何信息的空 traceback.
+                pass
             except OSError as e:
                 self.log.warning(f'初始化错误: "{e}", 签到器将停止.')
                 show_exception(e)
                 return self.ctx.finish(RunStatus.FAIL, f"初始化错误: {e}")
-            except asyncio.TimeoutError:
-                pass
             finally:
                 if not self.chat_name:
                     if old_mute_until:
@@ -377,7 +379,7 @@ class BotCheckin(BaseBotCheckin):
                         else:
                             self.log.debug(f"[gray50]重新设置通知设置成功: {ident}[/]")
             if not self.finished.is_set():
-                self.log.warning("无法在时限内完成签到.")
+                self.log.warning(f"无法在时限内完成签到 ({self.timeout} 秒内无响应), 已跳过.")
                 return self.ctx.finish(RunStatus.FAIL, "无法在时限内完成签到")
             elif self.current_retries <= self.valid_retries:
                 if (
@@ -401,6 +403,10 @@ class BotCheckin(BaseBotCheckin):
                                 return self.ctx.finish(RunStatus.RESCHEDULE, "等待重新尝试签到")
                 return self.ctx.finish()
             else:
+                # 智能回答等路径会调用 fail() 把重试次数置为无限, 以"停止"后续流程;
+                # 但机器人仍可能随后返回"签到成功". 此时成功结果不应被覆盖为失败.
+                if self.ctx.status in (RunStatus.SUCCESS, RunStatus.NONEED):
+                    return self.ctx.finish()
                 return self.ctx.finish(RunStatus.FAIL, "重试次数超限")
 
     async def init(self):
@@ -452,6 +458,11 @@ class BotCheckin(BaseBotCheckin):
             task = asyncio.create_task(self.message_handler(client, message))
             self._handler_tasks.add(task)
             await task
+        except asyncio.TimeoutError:
+            # 同上: TimeoutError 属于 OSError, 需先于 OSError 捕获, 避免刷出空 traceback.
+            self.log.info("消息处理超时, 正在重试.")
+            await self.retry()
+            message.continue_propagation()
         except OSError as e:
             self.log.info(f'发生错误: "{e}", 正在重试.')
             show_exception(e)
@@ -750,6 +761,13 @@ class BotCheckin(BaseBotCheckin):
 
         if fail:
             self.current_retries = float("inf")
+        # 终态保护: 已成功或已判定无需签到时, 不再被失败类状态覆盖.
+        # 典型场景: 智能回答点击按钮后 fail() 停止流程, 但机器人随后仍返回"签到成功".
+        if status not in (RunStatus.SUCCESS, RunStatus.NONEED) and self.ctx.status in (
+            RunStatus.SUCCESS,
+            RunStatus.NONEED,
+        ):
+            return self
         self.ctx.status = status
         self.ctx.status_info = message
         self.finished.set()
