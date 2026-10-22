@@ -1,87 +1,195 @@
-[![build status](https://img.shields.io/github/actions/workflow/status/emby-keeper/emby-keeper/ci.yml?branch=main)](https://github.com/emby-keeper/emby-keeper/commits/main) [![pypi badge](https://img.shields.io/pypi/v/embykeeper)](https://pypi.org/project/embykeeper/) [![docker](https://img.shields.io/docker/v/embykeeper/embykeeper?label=docker)](https://hub.docker.com/r/embykeeper/embykeeper) [![docker pulls](https://img.shields.io/docker/pulls/embykeeper/embykeeper?label=pulls)](https://hub.docker.com/r/embykeeper/embykeeper) [![license badge](https://img.shields.io/github/license/emby-keeper/emby-keeper)](https://github.com/emby-keeper/emby-keeper/blob/main/LICENSE) [![telegram badge](https://img.shields.io/badge/telegram-bot-blue)](https://t.me/embykeeper_bot) [![telegram badge](https://img.shields.io/badge/telegram-channel-green)](https://t.me/embykeeper) [![telegram badge](https://img.shields.io/badge/telegram-group-violet)](https://t.me/embykeeperchat)
+# Embykeeper · cloudsonly fork
+
+[![CI](https://img.shields.io/github/actions/workflow/status/cloudsonly/emby-keeper/ci.yml?branch=main&label=CI)](https://github.com/cloudsonly/emby-keeper/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/ghcr.io-cloudsonly%2Femby--keeper-blue)](https://github.com/cloudsonly/emby-keeper/pkgs/container/emby-keeper)
+[![Version](https://img.shields.io/badge/version-7.7.0-green)](https://github.com/cloudsonly/emby-keeper)
+[![License](https://img.shields.io/github/license/cloudsonly/emby-keeper)](https://github.com/cloudsonly/emby-keeper/blob/main/LICENSE)
 
 <p align="center">
-  <a href='https://github.com/emby-keeper/emby-keeper'>
+  <a href='https://github.com/cloudsonly/emby-keeper'>
     <img src="https://github.com/emby-keeper/emby-keeper/raw/main/images/logo.svg" alt="Embykeeper" />
   </a>
 </p>
 <p align="center">
-    <b>自动签到 定时保号 按需水群</b>
+    <b>自动签到 · 定时保号 · 按需水群</b>
 </p>
 
 ---
 
-> **本仓库是一个合并版 fork（v7.7.0）**
->
-> 基于 [`aprpure/emby-keeper`](https://github.com/aprpure/emby-keeper)（本地 LLM 替代云端认证、`skip_auth`），
-> 融合 [`supermoon0201/emby-keeper`](https://github.com/supermoon0201/emby-keeper) 的 Emby 保活改造（自建 / 反代 / CDN 站点适配）、
-> [`Elykia093/emby-keeper`](https://github.com/Elykia093/emby-keeper) 的网页签到器（結束バンド）、
-> 以及 [`ignimutos/emby-keeper`](https://github.com/ignimutos/emby-keeper) 的真 bug 修复。
->
-> **改动清单、配置示例与已知限制见 [FORK.md](FORK.md)。**
->
-> 本仓库**不发布到 PyPI / Docker Hub**，请自行构建镜像或源码安装。
-> 下方文档中的安装命令与镜像地址均指向上游，直接使用会安装到原版。
+## 这是什么
+
+[emby-keeper/emby-keeper](https://github.com/emby-keeper/emby-keeper) 的合并增强版 fork。在保留上游全部功能的前提下，解决了三类实际问题：
+
+1. **不想用作者的云端认证服务** —— 上游的验证码解析、考核问答、看图选按钮全部依赖 `@embykeeper_auth_bot`。本 fork 用本地 LLM 替代，不向第三方发送任何内容。
+2. **自建 / 反代 / CDN 的 Emby 站点保活失败** —— 上游对标准 Emby API 的假设过强，畸形站点会卡在登录、取流、进度上报的任一环节。
+3. **网页签到站点缺失** —— 补上 `結束バンド`（plusemby）这类纯网页签到。
+
+**与上游的关系**：基于上游 `main` 分支 fast-forward 演进，没有改写历史。同步上游只需一次 `git merge`。
+
+**发布范围**：只发布容器镜像（`ghcr.io/cloudsonly/emby-keeper`），不发布 PyPI 包。
+
+---
+
+## 快速开始
+
+```bash
+docker run -d --name embykeeper \
+  --restart unless-stopped \
+  -e TZ=Asia/Shanghai \
+  -v $(pwd)/embykeeper:/app \
+  ghcr.io/cloudsonly/emby-keeper:latest
+```
+
+首次启动前先把 `config.toml` 放进挂载目录。完整模板见 [`config.example.toml`](config.example.toml)，最小可用配置：
+
+```toml
+[emby]
+time_range = "<11:00AM,11:00PM>"
+interval_days = "<7,12>"
+
+[[emby.account]]
+url = "https://your-emby.example.com"
+username = "your_username"
+password = "your_password"
+time = [300, 600]
+
+[llm]
+mode = "local"
+api_key = "sk-xxxxxxxx"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+model = "glm-4-flash"
+vision_model = "glm-4v-flash"
+
+[checkiner]
+time_range = "<11:00AM,11:00PM>"
+
+[[telegram.account]]
+phone = "+8613800000000"
+checkiner = true
+skip_auth = true
+
+[telegram.account.site]
+checkiner = ["all", "+plusemby"]
+```
+
+```bash
+docker logs -f embykeeper    # 首次运行在此输入手机验证码
+```
+
+`skip_auth = true` 时 `[llm]` 段必须填，否则考核问答、看图选按钮、图片验证码全部无解。
+
+---
+
+## 相对上游的改动
+
+| 能力 | 上游行为 | 本 fork |
+|---|---|---|
+| **总认证** | 启动即连 `@embykeeper_auth_bot` 校验身份 | `skip_auth = true` 走本地实现，完全不连 |
+| **additional_auth** | prime / super / captcha / ocr 站点需云端预检 | `[llm].skip_additional_auth = true` 无条件跳过预检 |
+| **验证码 / 考核问答** | 云端打码与 GPT | 本地 OpenAI 兼容接口（OpenAI / DeepSeek / 智谱 / 本地模型） |
+| **Emby 保活** | 标准 API 假设 | 分块限流、错误码 520–525、`PositionTicks` 夹 int4、租约恢复、base path 探测、CDN 取流、进度上报降级 |
+| **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
+| **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
+
+具体来源与取舍见 [FORK.md](FORK.md)。
+
+### 合并来源
+
+- [`aprpure/emby-keeper`](https://github.com/aprpure/emby-keeper) —— 本地 LLM 替代云端认证、`skip_auth`（作为基底）
+- [`supermoon0201/emby-keeper`](https://github.com/supermoon0201/emby-keeper) —— Emby 保活畸形站点适配
+- [`Elykia093/emby-keeper`](https://github.com/Elykia093/emby-keeper) —— 网页签到器
+- [`ignimutos/emby-keeper`](https://github.com/ignimutos/emby-keeper) —— 调度区间随机、Pydantic v2 校验器修复
+
+---
+
+## 镜像
+
+```
+ghcr.io/cloudsonly/emby-keeper:latest
+```
+
+| Tag | 触发方式 | 说明 |
+|---|---|---|
+| `latest` | 手动触发 `Docker Image Publish` | **生产部署用这个** |
+| `main-dev` | push `main` 自动触发 | 开发镜像，**必须挂 `/src`**，否则启动即退出 |
+
+双架构：`linux/amd64`、`linux/arm64`。
+
+包为私有时需登录：
+
+```bash
+echo <你的PAT> | docker login ghcr.io -u cloudsonly --password-stdin
+```
+
+---
+
+## 常用配置
+
+**网页签到**（该站默认 `__ignore__`，必须显式加入）：
+
+```toml
+[telegram.account.site]
+checkiner = ["all", "+plusemby"]
+```
+
+**畸形站点**（按站点逐个开，不要一次全开）：
+
+```toml
+[[emby.account]]
+stream_workaround = true          # Range / 分块读取被拒
+external_stream_workaround = true # 外部流媒体地址同样兼容
+stream_cdn_path = true            # 走 CDN 取流
+progress_fallback = true          # 进度上报失败时只发结束事件
+allow_stream = true               # 取不到片长仍播放（约 10 分钟）
+verify = true                     # 单独开启 TLS 校验
+```
+
+**Turnstile 求解**（月饼 embyguard 等）：
+
+```toml
+[turnstile]
+solver_url = "http://127.0.0.1:8889"
+# 或
+yescaptcha_key = ""
+```
+
+**本地 helper**（承接 captcha / wssocks / Telegram 推送等 LLM 做不了的能力）：
+
+```toml
+[llm]
+helper_command = "python /app/helper.py"
+helper_timeout = 120
+```
+
+协议：stdin 单行 JSON、stdout 单行 JSON、必须 exit 0。示例见 [`helper/helper.py`](helper/helper.py)。
 
 ---
 
 ## 功能
 
-Embykeeper 是一个 Emby 影视服务器签到保号的自动执行工具, 它主要提供两大核心功能:
+Embykeeper 是一个 Emby 影视服务器签到保号的自动执行工具，两大核心功能：
 
-1. **TG 机器人签到** - 可以自动完成 50+ 站点的 Telegram 机器人每日签到, 以获取积分.
+1. **TG 机器人签到** —— 自动完成 50+ 站点的 Telegram 机器人每日签到，获取积分。
+2. **Emby 保号** —— 模拟登录和播放视频，定期保持 Emby 账号活跃，支持任何 Emby 站点。
 
-2. **Emby 保号** - 通过模拟登录和播放视频, 定期保持 Emby 账号的活跃状态, 支持任何 Emby 站点.
+额外功能：
 
-除此之外, Embykeeper 还提供了一些额外功能：
+1. **自动抢注** —— 监听邀请码发码与开放注册信息，自动抢注。
+2. **群组游戏** —— 自动完成抢红包、答题等，获取积分。
+3. **考核辅助** —— 站点考核自动接入 GPT 与已知题库。
+4. **便捷二次开发** —— 基于 Pyrogram，提供一套框架实现新的签到器。
 
-1. **自动抢注** - 监听邀请码发码信息和开放注册信息, 并自动抢注.
-
-2. **群组游戏** - 自动完成群组内的抢红包和答题等游戏, 以获取积分.
-
-3. **考核辅助** - 站点考核自动接入 GPT 和 已知题库, 提高通过率.
-
-4. **便捷的二次开发** - 基于 Pyrogram 开发, 提供了一套便捷的框架来实现新的签到器.
-
-项目支持 Python 运行、Docker 部署或云部署, 且完全开源, 不存储任何密钥或隐私信息, 经两年的开发已经在稳定和安全性方面有一定保证.
+支持 Python 运行、Docker 部署或云部署，完全开源，不存储任何密钥或隐私信息。
 
 ## 声明
 
-本项目涉及的一切 Emby 服务器与 Embykeeper 开发团队无关, 在使用 Embykeeper 时造成的一切损失 (包括但不限于 Emby 或 Telegram 账号被封禁或被群封禁) 与开发团队无关. 为了您的账号安全, 推荐使用小号. 运行该工具的 Telegram 账号若通过接码注册, 请使用一段时间再接入本工具.
+本项目涉及的一切 Emby 服务器与 Embykeeper 开发团队无关，使用 Embykeeper 造成的一切损失（包括但不限于 Emby 或 Telegram 账号被封禁或被群封禁）与开发团队无关。为账号安全，推荐使用小号。运行该工具的 Telegram 账号若通过接码注册，请使用一段时间再接入本工具。
 
-本项目设计初衷是在中文 Emby 社群规则下, 保号要求逐渐苛刻 (部分要求每月登录或每日签到), 这使得休闲时间紧张的人士难以安心使用. 本项目仅旨在帮助该类人群保号, 不鼓励持有大量 Emby 账号而不使用, 导致真正需要的人、为中文影视资源分享和翻译有贡献的人难以获得账号的行为, 开发团队也呼吁仅保留 1-2 个较全面质量较高的 Emby 服务器. 本项目仅提供工具, 具体使用形式及造成的影响和后果与开发团队无关.
+本项目设计初衷是在中文 Emby 社群规则下，保号要求逐渐苛刻（部分要求每月登录或每日签到），使得休闲时间紧张的人士难以安心使用。本项目仅旨在帮助该类人群保号，不鼓励持有大量 Emby 账号而不使用、导致真正需要的人难以获得账号的行为，开发团队也呼吁仅保留 1-2 个较全面、质量较高的 Emby 服务器。本项目仅提供工具，具体使用形式及造成的影响和后果与开发团队无关。
 
-Embykeeper 将自动向 Embykeeper Auth Bot ([@embykeeper_auth_bot](https://t.me/embykeeper_auth_bot))" 发送信息, 用于在线验证码解析、日志记录、用户验证等, 内容不含任何密码或密钥信息, 或其他敏感隐私信息.
+**本 fork 不向 `@embykeeper_auth_bot` 发送任何内容**（`skip_auth = true` 时）。若关闭 `skip_auth`，行为与上游一致。
 
-当您安装并使用该工具, 默认您已经阅读并同意上述声明, 并确认自己并非出于"集邮"目的而安装.
-
-## 安装与使用
-
-Embykeeper 支持 Docker 或 PyPI 安装 (Linux / Windows), 也支持云部署, 请点击下方按钮开始部署:
-
-[![Setup Tutorial](https://github.com/emby-keeper/emby-keeper/raw/main/images/setup-button.svg)](https://emby-keeper.github.io/guide/安装指南)
-
-若您没有服务器, 您可以通过免费托管平台进行部署, 点击下方按钮开始部署:
-
-[![Deploy to Huggingface Space](https://github.com/emby-keeper/emby-keeper/raw/main/images/deploy-to-hf.svg)](https://huggingface.co/spaces/ekuser/ek?duplicate=true)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[![Tutorial](https://github.com/emby-keeper/emby-keeper/raw/main/images/hf-tutorial.svg)](https://blog.zetx.tech/2024/05/19/embykeeper-hf-tutorial/)
-
-若您有服务器, 我们推荐使用 [Docker 部署](https://emby-keeper.github.io/guide/Linux-Docker-部署):
-
-```bash
-docker run -v $(pwd)/embykeeper:/app --rm -it --net=host embykeeper/embykeeper -i
-```
-
-**注意**: 由于近期 Telegram 风控等级上升, 请尽可能先使用服务器所在地区的代理在手机上先登陆一次, 再使用 Embykeeper.
-
-您也可以使用 [Docker Compose 部署](https://emby-keeper.github.io/guide/Linux-Docker-Compose-部署).
-
-更多安装和配置方面的帮助请参考 [**📖 教程文档**](https://emby-keeper.github.io/).
-
-本项目欢迎友善讨论与建议, 您可以通过 [Github Issue](https://github.com/emby-keeper/emby-keeper) 途径反馈, 并认可开发团队可以关闭与项目开发不直接相关的不友善讨论. 您也可以通过 [Telegram 讨论群](https://t.me/embykeeper_chat_bot) 获得社区帮助.
-
-## 运行截图
-
-![Screenshot](https://github.com/emby-keeper/emby-keeper/raw/main/images/screenshot.png)
+当您安装并使用该工具，默认您已经阅读并同意上述声明，并确认自己并非出于"集邮"目的而安装。
 
 ## 完整功能支持列表
 
@@ -303,15 +411,24 @@ docker run -v $(pwd)/embykeeper:/app --rm -it --net=host embykeeper/embykeeper -
 
     <!-- #endregion messager-ignored-sites -->
 
-**注意**: 部分功能由于涉及竞争条件和付费验证码解析服务等, 仅有[高级用户](https://emby-keeper.github.io/guide/高级用户)才能使用, 您需要共享邀请码或[赞助项目](https://afdian.com/a/jackzzs)以成为永久有效期的高级用户.
+**说明**: 本 fork 已移除对云端认证服务的依赖。上表中标注"仅高级用户可用"的功能，在 `skip_auth = true` 时通过本地 LLM 实现，无需赞助或共享邀请码。仍需要付费打码服务的站点（captcha 类）请自行配置 `[turnstile]` 或 `[llm].helper_command`。
 
-## 支持 Embykeeper
+## 致谢
 
-##### 开发者团队
+核心功能全部由上游团队完成：
 
-- ~~[jackzzs](https://github.com/jackzzs)~~
-- [zetxtech](https://github.com/zetxtech)
+- [jackzzs](https://github.com/jackzzs) —— 项目原作者
+- [zetxtech](https://github.com/zetxtech) —— 主要维护者
 
-##### 通过[爱发电](https://afdian.com/a/jackzzs)赞助
+本 fork 合并的改进来自：
 
-![Kitty](https://github.com/emby-keeper/emby-keeper/raw/main/images/kitty.gif)
+- [aprpure](https://github.com/aprpure) —— 本地 LLM 替代方案
+- [supermoon0201](https://github.com/supermoon0201) —— Emby 畸形站点适配
+- [Elykia093](https://github.com/Elykia093) —— 网页签到器
+- [ignimutos](https://github.com/ignimutos) —— 调度与校验器修复
+
+如果这个工具对你有帮助，请优先支持上游：[爱发电](https://afdian.com/a/jackzzs)。
+
+## 许可
+
+与上游一致，见 [LICENSE](LICENSE)。
