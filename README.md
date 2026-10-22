@@ -133,6 +133,23 @@ docker run -d --name embykeeper -v $(pwd)/app:/app --net=host \
 checkiner = ["all", "+plusemby"]
 ```
 
+**多个 plusemby（結束バンド）站点**：一个站点名只对应一份配置（`get_site_config` 返回单个 dict，写成 `[[checkiner.plusemby]]` 数组会报 `'list' object has no attribute 'get'`），所以多站点要按 Telegram 账号隔离：
+
+```toml
+[[telegram.account]]
+phone = "+8613800000001"
+
+[telegram.account.site]
+checkiner = ["plusemby"]
+
+[telegram.account.checkiner_config.plusemby]
+url = "https://a.example.com"
+username = "user_a"
+password = "pass_a"
+```
+
+注意 `checkiner_config` 是**整体替换**而非合并：一旦设置，该账号就不再继承全局 `[checkiner]` 的 `time_range` / `timeout` / `retries`，需要在这段里重写一遍。
+
 **畸形站点**（按站点逐个开，不要一次全开）：
 
 ```toml
