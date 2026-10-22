@@ -86,6 +86,32 @@ skip_auth = true
 
 `skip_auth = true` 时 `[llm]` 段必填，否则考核问答、看图选按钮、图片验证码全部无解。
 
+**几十个保活账号不必每个都写一遍客户端信息**：`device` / `client` / `client_version` / `useragent` / `device_id` 可以在 `[emby]` 段统一配置，账号未单独指定时自动继承；账号里写了的那一项优先级更高（例如个别账号要 `device = "Pixel 7 Pro"`）：
+
+```toml
+[emby]
+concurrency = 3
+device         = "Pixel 7"
+client         = "Fileball"
+client_version = "1.2.3"
+useragent      = "Fileball/1.2.3"
+device_id      = "0123456789abcdef0123456789abcdef"
+
+[[emby.account]]
+url = "https://a.example.com"
+username = "u1"
+password = "p1"
+time = [300, 600]
+
+[[emby.account]]
+url = "https://b.example.com"
+username = "u2"
+password = "p2"
+device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
+```
+
+五行全部留空也是合法的：程序会按「域名 + 用户名」生成一份指纹，并缓存在 `app/cache.json` 的 `emby.env.<域名>.<用户名>` 下，重启后保持不变。`[subsonic]` 段同样支持 `client` / `client_version` / `useragent` 三个全局值。
+
 ---
 
 ## 相对上游的改动

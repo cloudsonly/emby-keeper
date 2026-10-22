@@ -131,6 +131,21 @@ class MediaServerBaseConfig(ConfigModel):
     timeout: Optional[int] = 10
 
 
+# 客户端指纹相关字段: 账号未单独配置时, 从 [emby] / [subsonic] 的全局值继承.
+CLIENT_FIELDS_EMBY = ("device", "client", "client_version", "useragent", "device_id")
+CLIENT_FIELDS_SUBSONIC = ("client", "client_version", "useragent")
+
+
+def _fill_client_defaults(section: Any, accounts: Any, fields: tuple) -> None:
+    """把全局客户端信息填入未单独配置的账号, 账号级配置优先."""
+    for account in accounts or []:
+        for field in fields:
+            if getattr(account, field, None) is None:
+                value = getattr(section, field, None)
+                if value is not None:
+                    setattr(account, field, value)
+
+
 class EmbyAccount(ConfigModel):
     id: Optional[str] = None
     url: UseHttpUrl
@@ -174,6 +189,12 @@ class EmbyConfig(MediaServerBaseConfig):
     random_delay_range: List[int] = Field(default_factory=lambda: [180, 360], min_length=2, max_length=2)
     # 是否校验 TLS 证书; 默认关闭以兼容自签名证书的自建 / 反代站点
     verify: Optional[bool] = False
+    # 全局客户端信息: 账号未单独指定时继承, 免去每个账号重复写一遍
+    device: Optional[str] = None
+    client: Optional[str] = None
+    client_version: Optional[str] = None
+    useragent: Optional[str] = None
+    device_id: Optional[str] = None
     account: Optional[List[EmbyAccount]] = []
 
     @model_validator(mode="after")
@@ -184,6 +205,15 @@ class EmbyConfig(MediaServerBaseConfig):
             raise ValueError("random_delay_range 中的等待时间不能小于 0")
         if start > end:
             raise ValueError("random_delay_range 的起始时间不能大于结束时间")
+        return self
+
+    @model_validator(mode="after")
+    def apply_client_defaults(self):
+        """把 [emby] 段的全局客户端信息填入未单独配置的账号.
+
+        账号级配置优先级更高: 只有字段为 None 时才用全局值覆盖.
+        """
+        _fill_client_defaults(self, self.account, CLIENT_FIELDS_EMBY)
         return self
 
 
@@ -210,7 +240,17 @@ class SubsonicAccount(ConfigModel):
 
 
 class SubsonicConfig(MediaServerBaseConfig):
+    # 全局客户端信息: 账号未单独指定时继承
+    client: Optional[str] = None
+    client_version: Optional[str] = None
+    useragent: Optional[str] = None
     account: Optional[List[SubsonicAccount]] = []
+
+    @model_validator(mode="after")
+    def apply_client_defaults(self):
+        """把 [subsonic] 段的全局客户端信息填入未单独配置的账号."""
+        _fill_client_defaults(self, self.account, CLIENT_FIELDS_SUBSONIC)
+        return self
 
 
 class TelegramAccount(ConfigModel):
