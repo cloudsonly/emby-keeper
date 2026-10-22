@@ -223,3 +223,49 @@ def test_duplicate_challenge_ignored_while_pending():
 
     asyncio.run(scenario())
     assert inst.gpt_calls == []
+
+
+def test_success_during_challenge_is_replayed_after_answer():
+    """机器人常在答对瞬间就发成功消息, 那时智能回答还没返回, 不能丢."""
+    inst = make_checkin()
+
+    async def fake_gpt(message, unexpected=True):
+        inst.gpt_calls.append(unexpected)
+        await inst.on_text(None, "签到成功: 2 牛币, 当前持有 574 牛币")
+        return True
+
+    inst.gpt_handle_message = fake_gpt
+
+    async def scenario():
+        await inst.on_text(None, "请完成诗句填空进行验证")
+
+    asyncio.run(scenario())
+    assert inst.gpt_calls == [False]
+    assert inst.ctx.status == RunStatus.SUCCESS
+    assert inst.finished.is_set()
+
+
+class FakeDocumentMessage:
+    """文档 / 视频 / 动图带说明文字: 没有 .text 也没有 .photo."""
+
+    def __init__(self, caption):
+        self.photo = None
+        self.text = None
+        self.caption = caption
+
+
+def test_caption_on_non_photo_media_is_not_dropped():
+    inst = make_checkin()
+    inst.bot_use_captcha = True
+    inst.bot_checkin_caption_pat = None
+    msg = FakeDocumentMessage("签到成功 | 2 牛币, 当前持有 574 牛币")
+    assert inst.message_type(msg) == MessageType.CAPTION
+
+
+def test_result_card_photo_is_not_ocrd():
+    """签到结果卡片也可能是一张图, 当验证码 OCR 会把乱码发出去, 结果消息反而被忽略."""
+    inst = make_checkin()
+    inst.bot_use_captcha = True
+    inst.bot_checkin_caption_pat = None
+    msg = FakePhotoMessage("✅ 验证通过: 北斗七星高, 哥舒夜带刀. 🐮 签到成功 | 2 牛币")
+    assert inst.message_type(msg) == MessageType.CAPTION

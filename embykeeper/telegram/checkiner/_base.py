@@ -211,6 +211,7 @@ class BotCheckin(BaseBotCheckin):
     bot_success_keywords: Union[str, List[str]] = []  # 成功时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_challenge_keywords: Union[str, List[str]] = []  # 验证问题关键词, 命中后交给智能回答, 置空使用内置关键词表
     _challenge_pending = False  # 验证题正在解答中, 期间忽略含成功关键词的提示消息
+    _pending_success_text = None  # 解答验证题期间收到的成功消息, 作答结束后补处理
     bot_checked_keywords: Union[str, List[str]] = []  # 今日已签到时检测的关键词, 置空使用内置关键词表
     bot_account_fail_keywords: Union[str, List[str]] = []  # 账户错误将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = []  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
@@ -544,6 +545,10 @@ class BotCheckin(BaseBotCheckin):
                     k.set()
                     self._waiting[p] = message
         type = type or self.message_type(message)
+        if type == MessageType.IGNORE:
+            # 无文字内容的消息 (贴纸 / 纯图片等). 记一笔, 便于排查 "结果消息没被处理".
+            self.log.debug(f"忽略无文字内容的消息 (id={getattr(message, 'id', None)}).")
+            return
         if type:
             if MessageType.TEXT in type:
                 await self.on_text(message, message.text)
@@ -552,6 +557,20 @@ class BotCheckin(BaseBotCheckin):
             if MessageType.CAPTCHA in type:
                 await self.on_photo(message)
 
+    def is_result_text(self, text: str) -> bool:
+        """判断文字是否为签到结果 (成功 / 失败 / 已签到 / 账户错误).
+
+        用于避免把 "带说明文字的签到结果卡片" 当成验证码去 OCR:
+        这类卡片被识别成乱码后会被当作答案发出去, 而真正的结果消息反而被忽略.
+        """
+        if not text:
+            return False
+        for name in ("success", "fail", "checked", "account_fail", "too_many_tries_fail"):
+            keywords = to_iterable(getattr(self, f"bot_{name}_keywords", [])) or default_keywords[name]
+            if any(s in text for s in keywords):
+                return True
+        return False
+
     def message_type(self, message: Message):
         """分析传入消息的类型为验证码或文字."""
         if message.photo:
@@ -559,6 +578,9 @@ class BotCheckin(BaseBotCheckin):
                 # 图片只是配图, 真正的验证在文字和按钮里 (如 "防機器签到验证: 请依次点击下方
                 # 按钮补全诗句"). 这类消息当验证码 OCR 只会识别失败并反复重试.
                 if self.is_challenge_text(message.caption):
+                    return MessageType.CAPTION
+                # 同理: "✅ 验证通过 / 🐮 签到成功" 这类结果卡片也不是验证码.
+                if self.is_result_text(message.caption):
                     return MessageType.CAPTION
                 if self.bot_use_captcha:
                     if self.bot_checkin_caption_pat:
@@ -577,6 +599,10 @@ class BotCheckin(BaseBotCheckin):
                     return MessageType.IGNORE
         elif message.text:
             return MessageType.TEXT
+        elif message.caption:
+            # 文档 / 视频 / 动图 / 语音等非图片媒体也可能带说明文字.
+            # 旧实现只认 .photo, 这类消息会被静默丢弃, 签到结果就再也等不到了.
+            return MessageType.CAPTION
         else:
             return MessageType.IGNORE
 
@@ -669,6 +695,12 @@ class BotCheckin(BaseBotCheckin):
                 await self.gpt_handle_message(message, unexpected=False)
             finally:
                 self._challenge_pending = False
+            # 机器人往往在答对的瞬间就发出成功消息, 那时智能回答还没返回.
+            # 暂存下来在此刻补处理, 否则会一直等到超时.
+            pending, self._pending_success_text = self._pending_success_text, None
+            if pending:
+                self.log.info(f"处理作答期间收到的成功消息: {truncate_str(pending, 40)}")
+                await self.on_text(None, pending)
         elif any(
             s in text for s in to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
         ):
@@ -690,8 +722,10 @@ class BotCheckin(BaseBotCheckin):
         elif any(s in text for s in to_iterable(self.bot_success_keywords) or default_keywords["success"]):
             if self._challenge_pending:
                 # 机器人常把 "请完成诗句填空进行验证" 这类提示单独发一条, 里面带 "完成".
-                # 此时智能回答可能还在点按钮, 一旦判成功就会取消它, 题目等于没做.
-                self.log.info(f"验证题解答中, 忽略疑似成功消息: {truncate_str(text, 40)}")
+                # 此时智能回答可能还在点按钮, 直接判成功会取消它, 直接丢弃又会一直等到超时,
+                # 所以先暂存, 等作答结束后补处理.
+                self._pending_success_text = text
+                self.log.info(f"验证题解答中, 暂存疑似成功消息: {truncate_str(text, 40)}")
                 return
             if await self.before_success():
                 if self.bot_success_pat:
