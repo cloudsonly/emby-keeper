@@ -124,6 +124,24 @@ def test_multiclick_in_unexpected_mode_still_fails():
     assert len(inst.failed) == 1
 
 
+def test_poem_fill_accepts_plain_chars():
+    """模型有时直接给字 ("丛在") 而不写 [CLICK]^丛^, 诗句题要能兜住."""
+    FakeLink.answer = "答案是：丛在"
+    inst = make_checkin()
+    message = FakeMessage(POEM, BUTTONS)
+    assert asyncio.run(inst.gpt_handle_message(message, unexpected=False)) is True
+    assert message.clicked == ["丛", "在"]
+
+
+def test_plain_chars_ignored_outside_poem_fill():
+    """非诗句题不启用字符兜底, 避免把解释文字当成答案乱点."""
+    FakeLink.answer = "丛在"
+    inst = make_checkin()
+    message = FakeMessage("请选择正确答案", BUTTONS)
+    asyncio.run(inst.gpt_handle_message(message, unexpected=False))
+    assert message.clicked == []
+
+
 def test_click_pattern_extracts_all_targets():
     assert _base.CLICK_PATTERN.findall("[CLICK]^丛^[CLICK]^在^") == ["丛", "在"]
     assert _base.CLICK_PATTERN.findall("[CLICK]^丛^") == ["丛"]

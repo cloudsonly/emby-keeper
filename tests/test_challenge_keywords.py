@@ -11,6 +11,7 @@ import pytest
 from loguru import logger
 
 from embykeeper.runinfo import RunContext, RunStatus
+from embykeeper.telegram.checkiner import _base
 from embykeeper.telegram.checkiner._base import BotCheckin, MessageType, default_keywords
 from embykeeper.telegram.checkiner._templ_a import TemplateACheckinConfig
 
@@ -169,3 +170,56 @@ def test_photo_with_challenge_caption_is_not_ocrd():
     assert inst.message_type(FakePhotoMessage(NIUBI_PROMPT)) == MessageType.CAPTION
     # 普通验证码图片仍然走 OCR
     assert inst.message_type(FakePhotoMessage("1234")) == MessageType.CAPTCHA
+
+
+def test_instruction_with_completion_word_is_a_challenge():
+    """ "请完成诗句填空进行验证" 只含 "完成" (成功关键词), 必须靠指令模式识别."""
+    inst = make_checkin()
+    for text in (
+        "请完成诗句填空进行验证",
+        "请进行人机验证",
+        "请完成下列填空",
+        "需要完成校验后才能签到",
+    ):
+        assert inst.is_challenge_text(text) is True, text
+
+
+def test_instruction_pattern_does_not_swallow_normal_replies():
+    inst = make_checkin()
+    for text in (
+        "请先完成签到",
+        "签到成功, 请点击查看详情",
+        "验证码错误, 请重试",
+        "签到成功: 获得奖励 5, 当前余额 347.",
+    ):
+        assert inst.is_challenge_text(text) is False, text
+
+
+def test_poem_fill_pattern_matches_both_phrasings():
+    for text in ("请依次点击下方按钮补全诗句：", "请完成诗句填空进行验证"):
+        assert _base.POEM_FILL_PATTERN.search(text), text
+    assert _base.POEM_FILL_PATTERN.search("签到成功, 当前 347 分") is None
+
+
+def test_success_ignored_while_challenge_pending():
+    """题面提示先到时, 不能让它把正在进行的作答取消掉."""
+    inst = make_checkin()
+    inst._challenge_pending = True
+
+    async def scenario():
+        await inst.on_text(None, "签到成功, 已完成验证")
+
+    asyncio.run(scenario())
+    assert inst.ctx.status != RunStatus.SUCCESS
+    assert not inst.finished.is_set()
+
+
+def test_duplicate_challenge_ignored_while_pending():
+    inst = make_checkin()
+    inst._challenge_pending = True
+
+    async def scenario():
+        await inst.on_text(None, NIUBI_PROMPT)
+
+    asyncio.run(scenario())
+    assert inst.gpt_calls == []

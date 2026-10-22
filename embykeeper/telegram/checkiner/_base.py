@@ -92,6 +92,17 @@ default_keywords = {
 # 只靠关键词会漏判, 因此额外用算式模式兜底.
 CHALLENGE_PATTERN = re.compile(r"\d+\s*[+\-*/×÷]\s*\d+\s*=")
 
+# 指令式的验证提示: "请完成诗句填空进行验证" / "请进行人机验证".
+# 这类提示只含 "完成" / "进行" 这类动作词, 却会撞上成功关键词表里的 "完成",
+# 一旦被判成功, 正在进行的智能回答就会被直接取消, 题目等于没做.
+CHALLENGE_INSTRUCTION_PATTERN = re.compile(
+    r"(请|需|必须).{0,8}(完成|进行).{0,10}(验证|校验|填空|答题|作答)"
+    r"|(填空|补全).{0,4}(诗句|下列|题目|原文)"
+)
+
+# 补全诗句类题目: 诗句被挖空, 需要按顺序从按钮里选字填进去.
+POEM_FILL_PATTERN = re.compile(r"(补全|填空|填写).{0,4}诗|诗.{0,4}(填空|补全)")
+
 # 智能回答给出的点击指令, 一条回答里可以出现多个 (如 "依次点击补全诗句" 要点两下).
 CLICK_PATTERN = re.compile(r"\[CLICK\]\^(.+?)\^")
 
@@ -199,6 +210,7 @@ class BotCheckin(BaseBotCheckin):
     bot_allow_from_scratch: bool = False  # 允许从未聊天情况下启动
     bot_success_keywords: Union[str, List[str]] = []  # 成功时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_challenge_keywords: Union[str, List[str]] = []  # 验证问题关键词, 命中后交给智能回答, 置空使用内置关键词表
+    _challenge_pending = False  # 验证题正在解答中, 期间忽略含成功关键词的提示消息
     bot_checked_keywords: Union[str, List[str]] = []  # 今日已签到时检测的关键词, 置空使用内置关键词表
     bot_account_fail_keywords: Union[str, List[str]] = []  # 账户错误将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = []  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
@@ -618,7 +630,8 @@ class BotCheckin(BaseBotCheckin):
     def is_challenge_text(self, text: str) -> bool:
         """判断是否为验证问题 (算术题 / 请答题), 而不是签到结果.
 
-        先看关键词, 再看算式模式. 后者能覆盖 "请完成下面这道题后签到: 17 - 15 = ?"
+        先看关键词, 再看算式与指令模式. 后者能覆盖
+        "请完成下面这道题后签到: 17 - 15 = ?" 与 "请完成诗句填空进行验证"
         这类同时含 "完成" 的题面 —— 否则会被当成签到成功而漏答.
         """
         if not text:
@@ -627,7 +640,10 @@ class BotCheckin(BaseBotCheckin):
         if any(s in text for s in keywords):
             return True
         # NFKC 把全角 "８－５＝" 归一成 "8-5=", 否则中文站点用全角符号会漏判.
-        return bool(CHALLENGE_PATTERN.search(unicodedata.normalize("NFKC", text)))
+        normalized = unicodedata.normalize("NFKC", text)
+        if CHALLENGE_PATTERN.search(normalized):
+            return True
+        return bool(CHALLENGE_INSTRUCTION_PATTERN.search(normalized))
 
     async def on_text(self, message: Message, text: str):
         """接收非验证码消息时, 检测关键词并确认签到成功或失败, 发送用户提示."""
@@ -641,10 +657,18 @@ class BotCheckin(BaseBotCheckin):
         if any(s in text for s in to_iterable(self.bot_text_ignore)):
             pass
         elif self.is_challenge_text(text):
+            if self._challenge_pending:
+                # 题面和 "请完成…验证" 提示可能前后脚到达, 重复作答只会把按钮点乱.
+                self.log.info(f"验证题正在解答中, 忽略重复提示: {truncate_str(text, 40)}")
+                return
             # 例: MICU 点签到后要答算术题, EmbyYing_2 要输入答案发送.
             # 这类消息往往也含 "签到成功" / "请完成" 等字样, 若按成功处理就会漏答并误报成功.
             self.log.info("检测到验证问题, 正在尝试智能回答.")
-            await self.gpt_handle_message(message, unexpected=False)
+            self._challenge_pending = True
+            try:
+                await self.gpt_handle_message(message, unexpected=False)
+            finally:
+                self._challenge_pending = False
         elif any(
             s in text for s in to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
         ):
@@ -664,6 +688,11 @@ class BotCheckin(BaseBotCheckin):
             self.log.info(f"签到失败: 验证码错误或网络错误, 正在重试.")
             await self.retry()
         elif any(s in text for s in to_iterable(self.bot_success_keywords) or default_keywords["success"]):
+            if self._challenge_pending:
+                # 机器人常把 "请完成诗句填空进行验证" 这类提示单独发一条, 里面带 "完成".
+                # 此时智能回答可能还在点按钮, 一旦判成功就会取消它, 题目等于没做.
+                self.log.info(f"验证题解答中, 忽略疑似成功消息: {truncate_str(text, 40)}")
+                return
             if await self.before_success():
                 if self.bot_success_pat:
                     matches = re.search(self.bot_success_pat, text)
@@ -716,6 +745,15 @@ class BotCheckin(BaseBotCheckin):
                 "我正在进行签到, 机器将显示指令或状态, 我需要通过回答问题以避免被识别为机器人或自动化程序, 并希望完成签到, 现在机器给出的值为:\n\n"
                 f"{content}\n\n"
             )
+            poem_fill = bool(POEM_FILL_PATTERN.search(content))
+            if poem_fill:
+                # 补全诗句是知识题, 泛泛地问模型容易答成 "这是状态信息".
+                # 明确告诉它挖空位置与作答顺序, 命中率会高很多.
+                prompt += (
+                    "这是一道补全诗句的题目: 诗句中若干位置被挖空 (可能显示为方框、下划线或空格), "
+                    "需要按挖空出现的先后顺序, 从按钮中选出对应的字填回去。\n"
+                    "请先在心里还原完整原句, 再按顺序输出每个挖空对应的按钮。\n"
+                )
             if buttons:
                 prompt += (
                     f"你可选: {', '.join(button_specs)} 作为回答.\n"
@@ -734,6 +772,14 @@ class BotCheckin(BaseBotCheckin):
                 answer, by = await Link(self.client).gpt(prompt)
                 if answer:
                     self.log.debug(f"智能回答 ({by}): {answer}")
+                    targets = CLICK_PATTERN.findall(answer)
+                    if not targets and buttons and poem_fill:
+                        # 补全诗句时模型常直接给出要填的字 (如 "起足"), 没按 [CLICK] 格式输出.
+                        # 按出现顺序挑出命中的按钮字; 超过 4 个说明多半是在解释, 不予采信.
+                        picked = list(dict.fromkeys(c for c in answer if c in buttons))
+                        if 1 <= len(picked) <= 4:
+                            self.log.info(f"智能回答未按格式输出, 按字符匹配: {''.join(picked)}")
+                            targets = picked
                     if "[NO_RESP]" in answer:
                         if unexpected:
                             self.log.info(f"智能回答认为无需进行操作, 为了避免风险签到器将停止.")
@@ -752,17 +798,8 @@ class BotCheckin(BaseBotCheckin):
                         else:
                             self.log.info(f"智能回答认为这是一条状态信息, 无需进行操作.")
                             return True
-                    elif buttons and "[CLICK]" in answer:
+                    elif buttons and targets:
                         self.log.debug(f"当前按钮: {', '.join(button_specs)}")
-                        targets = CLICK_PATTERN.findall(answer)
-                        if not targets:
-                            if unexpected:
-                                self.log.info(f"智能回答失败, 为了避免风险签到器将停止.")
-                                await self.fail()
-                                return False
-                            else:
-                                self.log.warning(f"智能回答失败.")
-                                return False
                         # 先把所有目标都匹配到按钮上, 再按顺序点击.
                         # 部分机器人要求先点对前一个才允许点下一个, 中途匹配失败时整体重来.
                         matched_buttons = []
