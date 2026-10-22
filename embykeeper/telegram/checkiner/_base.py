@@ -62,6 +62,9 @@ default_keywords = {
     "checked": ("只能", "已经", "过了", "签过", "明日再来", "重复签到"),
     "fail": ("失败", "错误", "超时"),
     "success": ("成功", "通过", "完成", "获得"),
+    # 验证问题: 这类消息常带 "签到成功" 字样 (如 "签到成功, 请回答: 5+5=?"),
+    # 直接按成功关键词判定会漏答, 因此优先交给智能回答处理.
+    "challenge": ("请回答", "请计算", "请输入答案", "请选择正确答案", "回答下列", "请作答"),
 }
 
 
@@ -167,6 +170,7 @@ class BotCheckin(BaseBotCheckin):
     bot_use_history: int = None  # 首先尝试识别历史记录中最后一个验证码图片, 最多识别 N 条, 置空禁用
     bot_allow_from_scratch: bool = False  # 允许从未聊天情况下启动
     bot_success_keywords: Union[str, List[str]] = []  # 成功时检测的关键词 (暂不支持regex), 置空使用内置关键词表
+    bot_challenge_keywords: Union[str, List[str]] = []  # 验证问题关键词, 命中后交给智能回答, 置空使用内置关键词表
     bot_checked_keywords: Union[str, List[str]] = []  # 今日已签到时检测的关键词, 置空使用内置关键词表
     bot_account_fail_keywords: Union[str, List[str]] = []  # 账户错误将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = []  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
@@ -582,6 +586,13 @@ class BotCheckin(BaseBotCheckin):
                 return
         if any(s in text for s in to_iterable(self.bot_text_ignore)):
             pass
+        elif any(
+            s in text for s in to_iterable(self.bot_challenge_keywords) or default_keywords["challenge"]
+        ):
+            # 例: MICU 点签到后要答算术题, EmbyYing_2 要输入答案发送.
+            # 这类消息往往也含 "签到成功", 若按成功处理就会漏答并误报成功.
+            self.log.info("检测到验证问题, 正在尝试智能回答.")
+            await self.gpt_handle_message(message, unexpected=False)
         elif any(
             s in text for s in to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
         ):

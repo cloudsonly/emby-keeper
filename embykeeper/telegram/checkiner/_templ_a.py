@@ -22,6 +22,7 @@ class TemplateACheckinConfig(BaseModel):
     bot_text_ignore_answer: Union[str, List[str]] = None  # 忽略的响应文本
     bot_fail_keywords: Union[str, List[str]] = None  # 签到错误将重试时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_success_keywords: Union[str, List[str]] = None  # 成功时检测的关键词 (暂不支持regex), 置空使用内置关键词表
+    bot_challenge_keywords: Union[str, List[str]] = None  # 验证问题关键词, 命中后交给智能回答, 置空使用内置关键词表
     bot_success_pat: Optional[str] = None  # 当接收到成功消息后, 从消息中提取数字的模式
     bot_captcha_len: Optional[int] = None  # 验证码长度的可能范围
     bot_text_ignore: Union[str, List[str]] = None  # 当含有列表中的关键词, 即忽略该消息, 置空不限制
@@ -58,6 +59,7 @@ class TemplateACheckin(BotCheckin):
         self.bot_text_ignore_answer = self.t_config.bot_text_ignore_answer or self.bot_text_ignore_answer
         self.bot_fail_keywords = self.t_config.bot_fail_keywords or self.bot_fail_keywords
         self.bot_success_keywords = self.t_config.bot_success_keywords or self.bot_success_keywords
+        self.bot_challenge_keywords = self.t_config.bot_challenge_keywords or self.bot_challenge_keywords
         self.bot_success_pat = self.t_config.bot_success_pat or self.bot_success_pat
         self.bot_captcha_len = self.t_config.bot_captcha_len or self.bot_captcha_len
         self.bot_text_ignore = self.t_config.bot_text_ignore or self.bot_text_ignore
