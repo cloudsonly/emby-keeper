@@ -85,9 +85,7 @@ def test_classify_status_response():
 
 
 def test_classify_checkin_response_success_with_amount():
-    status, message = classify_checkin_response(
-        200, {"success": True, "amount": 12, "currencyUnit": "分"}
-    )
+    status, message = classify_checkin_response(200, {"success": True, "amount": 12, "currencyUnit": "分"})
     assert status == RunStatus.SUCCESS
     assert message == "+12 分"
 
@@ -99,9 +97,7 @@ def test_classify_checkin_response_success_without_amount():
 
 
 def test_classify_checkin_response_already_checked_in():
-    status, message = classify_checkin_response(
-        200, {"success": False, "hasCheckedIn": True}
-    )
+    status, message = classify_checkin_response(200, {"success": False, "hasCheckedIn": True})
     assert status == RunStatus.NONEED
 
 

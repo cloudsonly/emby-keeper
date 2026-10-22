@@ -291,6 +291,7 @@ class Link:
 
     async def captcha(self, site: str, url: str = None) -> Optional[str]:
         """向机器人发送验证码解析请求."""
+
         async def local_call():
             return await self.local.captcha(site, url)
 
@@ -304,10 +305,13 @@ class Link:
             else:
                 return None
 
-        return await self._call_with_remote_fallback(local_call, remote_call, lambda result: bool(result), "captcha")
+        return await self._call_with_remote_fallback(
+            local_call, remote_call, lambda result: bool(result), "captcha"
+        )
 
     async def captcha_content(self, site: str, url: str = None) -> Optional[str]:
         """向机器人发送带验证码的远程网页解析请求."""
+
         async def local_call():
             return await self.local.captcha_content(site, url)
 
@@ -327,6 +331,7 @@ class Link:
 
     async def wssocks(self) -> Tuple[Optional[str], Optional[str]]:
         """向机器人发送逆向 Socks 代理隧道监听请求."""
+
         async def local_call():
             return await self.local.wssocks()
 
@@ -346,6 +351,7 @@ class Link:
         self, token: str, url: str, user_agent: Optional[str] = None
     ) -> Tuple[Optional[str], Optional[str]]:
         """向机器人发送通过代理隧道进行验证码解析请求."""
+
         async def local_call():
             return await self.local.captcha_wssocks(token, url, user_agent)
 
@@ -421,6 +427,7 @@ class Link:
 
     async def visual(self, photo, options: List[str], question=None) -> Tuple[Optional[str], Optional[str]]:
         """向机器人发送视觉问题解答请求."""
+
         async def local_call():
             photo_bytes = await self._download_photo(photo)
             if photo_bytes:
@@ -443,6 +450,7 @@ class Link:
 
     async def ocr(self, photo) -> Optional[str]:
         """向机器人发送 OCR 解答请求."""
+
         async def local_call():
             photo_bytes = await self._download_photo(photo)
             if photo_bytes:
@@ -457,7 +465,9 @@ class Link:
             else:
                 return None
 
-        return await self._call_with_remote_fallback(local_call, remote_call, lambda result: bool(result), "ocr")
+        return await self._call_with_remote_fallback(
+            local_call, remote_call, lambda result: bool(result), "ocr"
+        )
 
     async def send_log(self, message):
         """向机器人发送日志记录请求."""

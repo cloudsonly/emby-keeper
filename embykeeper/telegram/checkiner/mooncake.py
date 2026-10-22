@@ -122,9 +122,7 @@ class MooncakeCheckin(TemplateACheckin):
         try:
             bot_peer = await self.client.resolve_peer(self.bot_username)
             url_auth = (
-                await self.client.invoke(
-                    RequestWebView(peer=bot_peer, bot=bot_peer, platform="ios", url=url)
-                )
+                await self.client.invoke(RequestWebView(peer=bot_peer, bot=bot_peer, platform="ios", url=url))
             ).url
         except Exception as e:
             self.log.warning(f"签到失败: 无法打开 WebApp ({e.__class__.__name__}: {e}).")
@@ -136,9 +134,7 @@ class MooncakeCheckin(TemplateACheckin):
         server = parse_qs(urlparse(url).query).get("server", [None])[0]
         if not server:
             server = parse_qs(urlparse(url_auth).query).get("server", [None])[0]
-        self.log.debug(
-            f"WebApp 凭据: server={server!r}, init_data_len={len(init_data) if init_data else 0}"
-        )
+        self.log.debug(f"WebApp 凭据: server={server!r}, init_data_len={len(init_data) if init_data else 0}")
         if not init_data or not server:
             self.log.warning("签到失败: 无法获取 WebApp 数据或 server 参数.")
             return await self.fail()
@@ -149,9 +145,7 @@ class MooncakeCheckin(TemplateACheckin):
         if not isinstance(result, dict):
             return {}
         data = result.get("data")
-        if isinstance(data, dict) and (
-            "status" in data or "site_key" in data or "challenge" in data
-        ):
+        if isinstance(data, dict) and ("status" in data or "site_key" in data or "challenge" in data):
             return data
         return result
 
@@ -213,9 +207,7 @@ class MooncakeCheckin(TemplateACheckin):
                     allow_redirects=True,
                     headers=headers,
                 ) as session:
-                    resp = await session.post(
-                        f"{api}/telegram/checkin", json={"init_data": init_data}
-                    )
+                    resp = await session.post(f"{api}/telegram/checkin", json={"init_data": init_data})
                     if resp.status_code == 403 and (
                         "Just a moment" in (resp.text or "") or "cf-wrapper" in (resp.text or "")
                     ):
@@ -262,13 +254,10 @@ class MooncakeCheckin(TemplateACheckin):
                         f"Turnstile 参数: site_key={site_key[:16]}..., "
                         f"action={action!r}, cdata_len={len(cdata)}, challenge={challenge[:16]}..."
                     )
-                    token = await self._solve_turnstile(
-                        webview_url, site_key, action=action, cdata=cdata
-                    )
+                    token = await self._solve_turnstile(webview_url, site_key, action=action, cdata=cdata)
                     if not token:
                         self.log.warning(
-                            "签到失败: Turnstile 求解失败. "
-                            "请确认 SOLVER_URL / YESCAPTCHA_KEY 可用."
+                            "签到失败: Turnstile 求解失败. " "请确认 SOLVER_URL / YESCAPTCHA_KEY 可用."
                         )
                         return await self.fail()
 
@@ -297,9 +286,7 @@ class MooncakeCheckin(TemplateACheckin):
                     status = result.get("status")
                     if status in ("checked_in", "already_checked_in", "pending"):
                         return await self._handle_result(status, result)
-                    self.log.warning(
-                        f"签到失败: 验证码提交后返回异常:\n{truncate_str(str(raw), 300)}"
-                    )
+                    self.log.warning(f"签到失败: 验证码提交后返回异常:\n{truncate_str(str(raw), 300)}")
                     return await self.retry()
             except (RequestsError, OSError, ValueError) as e:
                 self.log.warning(

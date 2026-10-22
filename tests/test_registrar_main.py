@@ -485,9 +485,7 @@ def test_stop_account_cancels_started_timed_scheduler_tasks():
         registrar_main_module.Scheduler.from_str = fake_from_str
 
         assert (
-            manager.schedule_account(
-                make_account(phone="1000", registrar_config=account_registrar_config)
-            )
+            manager.schedule_account(make_account(phone="1000", registrar_config=account_registrar_config))
             is True
         )
         await asyncio.sleep(0)

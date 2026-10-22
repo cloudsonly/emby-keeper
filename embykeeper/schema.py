@@ -42,9 +42,7 @@ class UseStr(str):
 class UseHttpUrl(HttpUrl):
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type: Any, handler: GetCoreSchemaHandler):
-        return core_schema.no_info_before_validator_function(
-            cls.validate, handler.generate_schema(HttpUrl)
-        )
+        return core_schema.no_info_before_validator_function(cls.validate, handler.generate_schema(HttpUrl))
 
     @classmethod
     def validate(cls, v):
@@ -173,9 +171,7 @@ class EmbyAccount(ConfigModel):
 
 class EmbyConfig(MediaServerBaseConfig):
     random_delay: Optional[bool] = True
-    random_delay_range: List[int] = Field(
-        default_factory=lambda: [180, 360], min_length=2, max_length=2
-    )
+    random_delay_range: List[int] = Field(default_factory=lambda: [180, 360], min_length=2, max_length=2)
     # 是否校验 TLS 证书; 默认关闭以兼容自签名证书的自建 / 反代站点
     verify: Optional[bool] = False
     account: Optional[List[EmbyAccount]] = []

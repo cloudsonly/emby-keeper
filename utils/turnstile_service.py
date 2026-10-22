@@ -1,6 +1,7 @@
 """
 Turnstile验证服务类
 """
+
 from __future__ import annotations
 
 import os
@@ -98,12 +99,7 @@ class TurnstileService:
             or os.getenv("YESCAPTCHA_API_KEY", "")
             or cfg_key
         ).strip()
-        raw = (
-            solver_url
-            or os.getenv("SOLVER_URL", "")
-            or cfg_url
-            or DEFAULT_SOLVER_URL
-        )
+        raw = solver_url or os.getenv("SOLVER_URL", "") or cfg_url or DEFAULT_SOLVER_URL
         self.solver_urls = _split_solver_urls(raw) or [DEFAULT_SOLVER_URL]
         # 兼容旧属性: 当前/首选地址
         self.solver_url = self.solver_urls[0]
@@ -193,9 +189,7 @@ class TurnstileService:
         last_error: Optional[Exception] = None
         for attempt in range(1, max_attempts + 1):
             try:
-                task_id = self.create_task(
-                    website_url, website_key, action=action, cdata=cdata
-                )
+                task_id = self.create_task(website_url, website_key, action=action, cdata=cdata)
                 token = self.get_response(task_id)
                 if token:
                     if attempt > 1 or (solver_url and solver_url != self.solver_urls[0]):
@@ -204,9 +198,7 @@ class TurnstileService:
                             f"solver={self.solver_url or 'yescaptcha'}, task_id={task_id})"
                         )
                     return token
-                last_error = RuntimeError(
-                    f"TurnstileService: 解码失败 (task_id={task_id})"
-                )
+                last_error = RuntimeError(f"TurnstileService: 解码失败 (task_id={task_id})")
             except Exception as e:
                 last_error = e
 
@@ -225,9 +217,7 @@ class TurnstileService:
                 )
 
         assert last_error is not None
-        if isinstance(last_error, RuntimeError) and str(last_error).startswith(
-            "TurnstileService: 解码失败"
-        ):
+        if isinstance(last_error, RuntimeError) and str(last_error).startswith("TurnstileService: 解码失败"):
             raise last_error
         raise RuntimeError(
             f"TurnstileService: 求解失败 (attempts={max_attempts}, "

@@ -29,7 +29,9 @@ class CcMonitor(Monitor):
         """启动时先检查历史记录中的邀请码"""
         self.log.info("正在检查历史记录...")
         try:
-            async for message in self.client.get_chat_history(self.chat_name[0] if isinstance(self.chat_name, list) else self.chat_name, limit=100):
+            async for message in self.client.get_chat_history(
+                self.chat_name[0] if isinstance(self.chat_name, list) else self.chat_name, limit=100
+            ):
                 text = message.text or message.caption
                 if text:
                     keys = re.findall(r"Cc-register-[\w]+-[\w]+-[\w]+-[\w]+", text)
@@ -44,7 +46,7 @@ class CcMonitor(Monitor):
     async def _try_invite_codes(self, keys):
         """尝试使用邀请码列表"""
         wr = async_partial(self.client.wait_reply, self.bot_username)
-        
+
         for invite_code in keys:
             success = False
             for _ in range(3):
@@ -52,13 +54,15 @@ class CcMonitor(Monitor):
                     msg = None
                     async for m in self.client.get_chat_history(self.bot_username, limit=1):
                         msg = m
-                    if msg and msg.reply_markup and any(
-                        "兑换注册码" in k.text for r in msg.reply_markup.inline_keyboard for k in r
+                    if (
+                        msg
+                        and msg.reply_markup
+                        and any("兑换注册码" in k.text for r in msg.reply_markup.inline_keyboard for k in r)
                     ):
                         pass
                     else:
                         msg = await wr("/start")
-                    
+
                     if "请确认好重试" in (msg.text or msg.caption):
                         continue
                     elif "欢迎使用" in (msg.text or msg.caption) and msg.reply_markup:
@@ -80,32 +84,28 @@ class CcMonitor(Monitor):
                                         break
                         else:
                             continue
-                        
+
                         msg = await wr(invite_code)
-                        
+
                         if "已被使用" in (msg.text or msg.caption) or "无效" in (msg.text or msg.caption):
                             self.log.info(f'邀请码 "{invite_code}" 已被使用或无效，尝试下一个...')
                             break
                         elif "注册成功" in (msg.text or msg.caption) or "成功" in (msg.text or msg.caption):
-                            self.log.bind(msg=True).info(
-                                f'注册成功！邀请码: "{invite_code}"'
-                            )
+                            self.log.bind(msg=True).info(f'注册成功！邀请码: "{invite_code}"')
                             success = True
                             break
                         else:
-                            self.log.bind(msg=True).info(
-                                f'已发送邀请码 "{invite_code}"，请查看结果.'
-                            )
+                            self.log.bind(msg=True).info(f'已发送邀请码 "{invite_code}"，请查看结果.')
                             success = True
                             break
                     else:
                         continue
                 except asyncio.TimeoutError:
                     pass
-            
+
             if success:
                 return True
-        
+
         self.log.bind(msg=True).warning(f"共 {len(keys)} 个邀请码，但全部失败.")
         return False
 

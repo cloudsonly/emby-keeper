@@ -220,7 +220,10 @@ class EmbybossRegister:
             try:
                 answer: BotCallbackAnswer = await panel.click(
                     create_button,
-                    timeout=min(self.create_button_callback_timeout, max(deadline - asyncio.get_running_loop().time(), 0.1)),
+                    timeout=min(
+                        self.create_button_callback_timeout,
+                        max(deadline - asyncio.get_running_loop().time(), 0.1),
+                    ),
                 )
             except (TimeoutError, MessageIdInvalid):
                 metrics["callback_timeouts"] += 1

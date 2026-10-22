@@ -30,4 +30,6 @@ jobs:
 
       - uses: psf/black@stable
         with:
+          # 钉住版本: black 的格式化规则随小版本变化, 用 stable 会让历史代码突然变红.
+          version: "~= 26.10"
           options: "--check --verbose"

@@ -48,9 +48,7 @@ def log(msg: str) -> None:
 
 def _opener():
     if PROXY:
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-        )
+        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": PROXY, "https": PROXY}))
     return urllib.request.build_opener()
 
 
