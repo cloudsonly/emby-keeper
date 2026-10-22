@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from enum import Flag, auto
 import time
+import unicodedata
 from typing import Iterable, List, Optional, Union
 
 from loguru import logger
@@ -602,7 +603,8 @@ class BotCheckin(BaseBotCheckin):
         keywords = to_iterable(self.bot_challenge_keywords) or default_keywords["challenge"]
         if any(s in text for s in keywords):
             return True
-        return bool(CHALLENGE_PATTERN.search(text))
+        # NFKC 把全角 "８－５＝" 归一成 "8-5=", 否则中文站点用全角符号会漏判.
+        return bool(CHALLENGE_PATTERN.search(unicodedata.normalize("NFKC", text)))
 
     async def on_text(self, message: Message, text: str):
         """接收非验证码消息时, 检测关键词并确认签到成功或失败, 发送用户提示."""

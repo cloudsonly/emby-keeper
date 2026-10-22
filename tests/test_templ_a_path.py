@@ -22,10 +22,18 @@ class FakeMarkup:
         self.inline_keyboard = [[FakeButton(text) for text in row] for row in rows]
 
 
+class FakeKeyboardMarkup:
+    """底部回复键盘: 没有 inline_keyboard, 按钮文字要当消息发出去."""
+
+    def __init__(self, rows):
+        self.keyboard = [[FakeButton(text) for text in row] for row in rows]
+
+
 class FakeMessage:
-    def __init__(self, rows, clicked):
-        self.reply_markup = FakeMarkup(rows)
+    def __init__(self, rows, clicked, markup=None):
+        self.reply_markup = markup if markup is not None else FakeMarkup(rows)
         self.clicked = clicked
+        self.replied = []
         self.text = ""
         self.caption = None
         self.edit_date = None
@@ -33,6 +41,10 @@ class FakeMessage:
     async def click(self, button_text):
         self.clicked.append(button_text)
         return "callback-answer"
+
+    async def reply(self, text):
+        self.replied.append(text)
+        return None
 
 
 class FakeAsyncIO:
@@ -115,6 +127,17 @@ def test_no_path_configured_is_noop(fast_sleep):
     message = FakeMessage([["用户功能"]], clicked)
     assert asyncio_run(inst._advance_button_path(message)) is False
     assert clicked == []
+
+
+def test_path_supports_reply_keyboard(fast_sleep):
+    """底部回复键盘没有回调, 应把按钮文字当消息发出."""
+    inst = make_checkin(["用户功能", "数据存档"])
+    clicked = []
+    message = FakeMessage(None, clicked, markup=FakeKeyboardMarkup([["用户功能", "我的信息"]]))
+    assert asyncio_run(inst._advance_button_path(message)) is True
+    assert message.replied == ["用户功能"]
+    assert clicked == []
+    assert inst._path_index == 1
 
 
 def test_send_checkin_resets_path_index(fast_sleep, monkeypatch):

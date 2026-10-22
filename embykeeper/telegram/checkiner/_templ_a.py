@@ -88,31 +88,52 @@ class TemplateACheckin(BotCheckin):
 
         部分机器人需要先点一级菜单 (如 "用户功能") 才能看到签到按钮 (如 "数据存档"),
         单次点击匹配不到就只会报 "账户错误". 配置路径后逐级点击, 最后一级视为签到按钮.
+
+        同时支持两种按钮: 消息内联按钮 (inline_keyboard) 和底部回复键盘 (keyboard).
+        后者没有回调, 直接把按钮文字当消息发出去.
         """
         path = to_iterable(self.bot_checkin_path) if self.bot_checkin_path else []
-        if not path or not message.reply_markup:
+        markup = message.reply_markup
+        if not path or not markup:
             return False
         index = self._path_index
         if index >= len(path):
             return False
-        keys = [k.text for r in message.reply_markup.inline_keyboard for k in r]
         target = path[index]
-        matched = next((k for k in keys if target in k), None)
-        if matched is None:
-            return False
-        self._path_index = index + 1
-        self.log.debug(f"点击菜单按钮 [{matched}] ({index + 1}/{len(path)}).")
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-        try:
-            answer: BotCallbackAnswer = await message.click(matched)
-        except TimeoutError:
-            self.log.debug("点击菜单按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+
+        inline = getattr(markup, "inline_keyboard", None)
+        if inline:
+            keys = [k.text for r in inline for k in r]
+            matched = next((k for k in keys if target in k), None)
+            if matched is None:
+                return False
+            self._path_index = index + 1
+            self.log.debug(f"点击菜单按钮 [{matched}] ({index + 1}/{len(path)}).")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            try:
+                answer: BotCallbackAnswer = await message.click(matched)
+            except TimeoutError:
+                self.log.debug("点击菜单按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+                return True
+            except MessageIdInvalid:
+                return True
+            if self._path_index >= len(path):
+                await self.on_button_answer(answer)
             return True
-        except MessageIdInvalid:
+
+        keyboard = getattr(markup, "keyboard", None)
+        if keyboard:
+            keys = [k.text for r in keyboard for k in r]
+            matched = next((k for k in keys if target in k), None)
+            if matched is None:
+                return False
+            self._path_index = index + 1
+            self.log.debug(f"发送键盘按钮 [{matched}] ({index + 1}/{len(path)}).")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await message.reply(matched)
             return True
-        if self._path_index >= len(path):
-            await self.on_button_answer(answer)
-        return True
+
+        return False
 
     async def message_handler(self, client, message: Message):
         text = message.caption or message.text
