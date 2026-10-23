@@ -87,6 +87,18 @@ default_keywords = {
     ),
 }
 
+
+def normalize_chat_id(value):
+    """把纯数字的会话 ID 字符串转成 int.
+
+    私有群 / 频道只能用数字 ID 表示, 而 pyrogram 的 get_chat 只把 str 当用户名解析,
+    因此配置里写的 "-1001234567890" 必须先转成 int, 否则会报 "UsernameNotOccupied".
+    """
+    if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+        return int(value.strip())
+    return value
+
+
 # 算术题形式的验证: "17 - 15 = ?" / "5+5=?".
 # 这类题面往往同时含 "完成" 等成功关键词 (如 "请完成下面这道题后签到"),
 # 只靠关键词会漏判, 因此额外用算式模式兜底.

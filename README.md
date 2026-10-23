@@ -124,6 +124,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **Emby 保活** | 标准 API 假设 | 分块限流、错误码 520–525、`PositionTicks` 夹 int4、租约恢复、base path 探测、CDN 取流、进度上报降级 |
 | **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
 | **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
+| **群组签到** | 仅少数站点内置，模板里写 `chat_name` 会被静默忽略 | `templ_a` / `templ_b` 支持 `chat_name`（保留机器人过滤），模板 B 另有 `is_chat` 与私有群数字 ID |
 
 合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
 
@@ -185,6 +186,44 @@ bot_checkin_path = ["用户功能", "数据存档"]
 ```
 
 `bot_checkin_path` 会按顺序点击按钮（内联按钮或底部回复键盘都支持），最后一级视为签到按钮；不配置时仍按原来的「在同一条消息里直接找签到按钮」逻辑，找不到会报「账户错误」。
+
+**群组签到**（有些站点只在群里响应，私聊机器人没反应）：
+
+| 场景 | 模板 | 关键配置 |
+|---|---|---|
+| 群里 @ 机器人发命令，等它回「签到成功」 | `templ_b` | `chat_name` |
+| 群里点按钮 / 走面板签到 | `templ_a` | `chat_name` |
+| 群里发个关键字就算签到 | `templ_b` | `is_chat` |
+| 群里发个关键字，发完即结束（不等回复） | `templ_b` | `is_chat` + `wait_response = false` |
+
+```toml
+# 1) 在群里跟机器人签到: 保留机器人过滤, 群友的闲聊不会被当成签到结果
+[checkiner.'templ_b<SomeEmbyBot>']
+name = "某某群签到"
+chat_name = "some_emby_group"             # 群的 @username, 或私有群数字 ID
+bot_checkin_cmd = "/checkin@SomeEmbyBot"  # 群里发命令必须带 @机器人名
+bot_success_keywords = ["签到成功"]
+
+# 2) 群里发关键字就算签到: 尖括号里写群, 不再当机器人
+[checkiner.'templ_b<some_emby_group>']
+name = "某某群每日打卡"
+is_chat = true
+bot_checkin_cmd = "签到"
+wait_response = false    # 不等回复, 发完直接结束
+bot_use_captcha = false
+
+# 3) 群里点按钮签到
+[checkiner.'templ_a<SomeEmbyBot>']
+name = "某某群按钮签到"
+chat_name = "some_emby_group"
+bot_checkin_cmd = "/start@SomeEmbyBot"
+```
+
+`chat_name` 与 `is_chat` 的区别：前者**保留** `filters.user(机器人)`，只处理机器人的回复；后者把尖括号里的会话直接当群，没有机器人可过滤，群里任何人说「成功」都可能被判签到成功，所以 `is_chat` 模式下务必用 `bot_success_keywords` 收窄。
+
+私有群 / 频道只能用数字 ID，站点名里也支持：`[checkiner.'templ_b<-1001234567890>']`（自动转成 int，写字符串会被 pyrogram 当用户名去解析）。若 `chat_name` 与站点名里的会话同名，过滤器会变成「群组发的消息 + 发信人是群组本身」，永远匹配不到，程序会打一条警告提醒改用 `is_chat`。
+
+已有内置群签到器可直接启用（都需显式加入白名单）：`pandatv_group`、`akile_group`、`bytevirt_group`、`epub_group`、`epub_group_chat`、`feiyuemusic_group_old`、`marmot_group_old`、`pornfans_group`、`pornfans_game_group`。其中 `pandatv_group` 属于默认启用范围，其余在 `__ignore__` 里。
 
 **MICU 股东会**已内置算术题处理：自动解析 `8 - 5 = ?`、在选项按钮里找等值项并点击，同时关掉了图片 OCR 和按钮 toast 解析。无需额外配置。
 

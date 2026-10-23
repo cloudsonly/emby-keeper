@@ -8,6 +8,7 @@ from embykeeper.ocr import CharRange
 from embykeeper.utils import to_iterable
 
 from . import BotCheckin
+from ._base import normalize_chat_id
 
 __ignore__ = True
 
@@ -33,6 +34,7 @@ class TemplateBCheckinConfig(BaseModel):
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = ([])  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_fail_keywords: Union[str, List[str]] = ([])  # 签到错误将重试时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     is_chat: bool = False  # 指定的用户名为群组用户名或 ID, 而非机器人
+    chat_name: Optional[Union[str, int]] = None  # 在指定群组中向机器人签到 (保留机器人过滤)
     max_retries: Optional[int] = None  # 验证码错误或网络错误时最高重试次数 (默认无限)
     checked_retries: Optional[int] = None  # 今日已签到时最高重试次数 (默认不重试)
     wait_response: bool = True  # 是否需要等待相关回复, 以确认签到完成
@@ -52,8 +54,17 @@ class TemplateBCheckin(BotCheckin):
         self.name = self.t_config.name or "自定义"
 
         if self.t_config.is_chat:
-            self.chat_name = self.bot_username
+            self.chat_name = normalize_chat_id(self.bot_username)
             self.bot_username = None
+        elif self.t_config.chat_name:
+            # 在群里向机器人签到: 保留 bot_username 过滤, 只处理机器人的回复,
+            # 避免群友的 "签到成功" 之类闲聊被误判为签到结果.
+            self.chat_name = normalize_chat_id(self.t_config.chat_name)
+            if self.chat_name == self.bot_username:
+                self.log.warning(
+                    "chat_name 与站点名里的会话相同, 机器人过滤会永远匹配不到消息. "
+                    "若该会话本身就是群组, 请改用 is_chat = true."
+                )
         self.bot_checkin_cmd = self.t_config.bot_checkin_cmd
         self.bot_send_interval = self.t_config.bot_send_interval
         self.bot_use_captcha = self.t_config.bot_use_captcha

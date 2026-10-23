@@ -11,6 +11,7 @@ from pyrogram.raw.types.messages import BotCallbackAnswer
 from embykeeper.utils import to_iterable
 
 from . import BotCheckin
+from ._base import normalize_chat_id
 
 __ignore__ = True
 
@@ -18,6 +19,7 @@ __ignore__ = True
 class TemplateACheckinConfig(BaseModel):
     # fmt: off
     name: Optional[str] = None  # 签到器的名称
+    chat_name: Optional[Union[str, int]] = None  # 在指定群组中向机器人签到, 置空则在私聊中签到
     use_button_answer: bool = None  # 点击按钮后等待并识别响应
     bot_text_ignore_answer: Union[str, List[str]] = None  # 忽略的响应文本
     bot_fail_keywords: Union[str, List[str]] = None  # 签到错误将重试时检测的关键词 (暂不支持regex), 置空使用内置关键词表
@@ -42,6 +44,21 @@ class TemplateACheckin(BotCheckin):
     bot_checkin_button = ["签到", "簽到"]
     bot_checkin_path = None
     templ_panel_keywords = None
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        # init() 在 start() 解析目标会话之后才执行, 而 chat_name 必须在解析前就绪,
+        # 否则会先去私聊机器人. 因此这里提前把群组配置读出来.
+        site_config = self.config if isinstance(self.config, dict) else {}
+        if site_config.get("chat_name"):
+            self.chat_name = normalize_chat_id(site_config["chat_name"])
+            if self.chat_name == self.bot_username:
+                # 这样过滤器会变成 "群组发的消息 + 发信人是群组本身", 永远匹配不到,
+                # 表现是静默等到超时. 该会话本身就是群组时应改用模板 B 的 is_chat.
+                self.log.warning(
+                    "chat_name 与站点名里的会话相同, 机器人过滤会永远匹配不到消息. "
+                    "若该会话本身就是群组, 请改用 templ_b 并设置 is_chat = true."
+                )
 
     async def init(self):
         try:
