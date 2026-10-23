@@ -1,6 +1,7 @@
 import asyncio
 import random
-from typing import List, Optional, Union
+import re
+from typing import List, Optional, Tuple, Union
 
 from loguru import logger
 from pydantic import BaseModel, ValidationError
@@ -32,6 +33,8 @@ class TemplateACheckinConfig(BaseModel):
     bot_checkin_cmd: Optional[str] = None  # Bot 依次执行的签到命令
     bot_use_captcha: Optional[bool] = None  # 当 Bot 返回图片时, 识别验证码并调用 on_captcha
     bot_checkin_button: Union[str, List[str]] = None  # 签到按钮文本
+    bot_checkin_button_pat: Optional[str] = None  # 签到按钮文本的正则, 文案不固定时使用
+    bot_checkin_button_index: Optional[Union[int, List[int]]] = None  # 签到按钮位置, 1 起
     bot_checkin_path: Union[str, List[str]] = None  # 依次点击的按钮文本, 用于需先进子菜单的机器人
     templ_panel_keywords: Union[str, List[str]] = None  # 面板关键词
     # fmt: on
@@ -42,6 +45,8 @@ class TemplateACheckin(BotCheckin):
     use_button_answer = True
     bot_checkin_cmd = "/start"
     bot_checkin_button = ["签到", "簽到"]
+    bot_checkin_button_pat = None
+    bot_checkin_button_index = None
     bot_checkin_path = None
     templ_panel_keywords = None
 
@@ -83,6 +88,15 @@ class TemplateACheckin(BotCheckin):
         self.bot_checkin_caption_pat = self.t_config.bot_checkin_caption_pat or self.bot_checkin_caption_pat
         self.bot_checkin_cmd = self.t_config.bot_checkin_cmd or self.bot_checkin_cmd
         self.bot_checkin_button = self.t_config.bot_checkin_button or self.bot_checkin_button
+        self.bot_checkin_button_pat = self.t_config.bot_checkin_button_pat or self.bot_checkin_button_pat
+        if self.t_config.bot_checkin_button_index is not None:
+            self.bot_checkin_button_index = self.t_config.bot_checkin_button_index
+        if self.bot_checkin_button_pat:
+            try:
+                re.compile(self.bot_checkin_button_pat)
+            except re.error as e:
+                self.log.warning(f"初始化失败: bot_checkin_button_pat 不是合法正则 ({e}).")
+                return False
         self.bot_checkin_path = self.t_config.bot_checkin_path or self.bot_checkin_path
         self.templ_panel_keywords = self.t_config.templ_panel_keywords or self.templ_panel_keywords
         self.bot_use_captcha = (
@@ -152,6 +166,68 @@ class TemplateACheckin(BotCheckin):
 
         return False
 
+    def _resolve_button_index(self, inline, index) -> Optional[Tuple[int, int]]:
+        """把 bot_checkin_button_index 解析成 (行, 列) 索引, 均从 0 起.
+
+        支持两种写法:
+          - 单个数字: 扁平序号, 从左到右、从上到下, 1 起 (如 8)
+          - 两个数字: 行列坐标, 1 起 (如 [4, 2])
+        """
+        values = list(to_iterable(index))
+        if len(values) == 1:
+            flat = int(values[0]) - 1
+            if flat < 0:
+                return None
+            counter = 0
+            for row_index, row in enumerate(inline):
+                for col_index in range(len(row)):
+                    if counter == flat:
+                        return (row_index, col_index)
+                    counter += 1
+            return None
+        if len(values) != 2:
+            return None
+        row_index, col_index = int(values[0]) - 1, int(values[1]) - 1
+        if row_index < 0 or col_index < 0:
+            return None
+        if row_index >= len(inline) or col_index >= len(inline[row_index]):
+            return None
+        return (row_index, col_index)
+
+    def _find_checkin_button(self, inline) -> Optional[Tuple[int, int]]:
+        """定位签到按钮, 返回 (行, 列) 索引, 找不到返回 None.
+
+        优先级: bot_checkin_button_index (位置) > bot_checkin_button_pat (正则)
+        > bot_checkin_button (文本包含).
+
+        有些机器人的签到按钮文案每天换 (如 "今朝已至"), 靠文本匹配必然失效,
+        只能用位置或正则定位.
+        """
+        if self.bot_checkin_button_index is not None:
+            return self._resolve_button_index(inline, self.bot_checkin_button_index)
+        pattern = re.compile(self.bot_checkin_button_pat) if self.bot_checkin_button_pat else None
+        keywords = to_iterable(self.bot_checkin_button) if self.bot_checkin_button else ()
+        for row_index, row in enumerate(inline):
+            for col_index, key in enumerate(row):
+                text = key.text or ""
+                if pattern and pattern.search(text):
+                    return (row_index, col_index)
+                if any(keyword in text for keyword in keywords):
+                    return (row_index, col_index)
+        return None
+
+    def _log_panel_buttons(self, inline):
+        """匹配失败时打印面板按钮, 便于判断是文案变了还是位置变了."""
+        flat = [key.text for row in inline for key in row]
+        if not flat:
+            self.log.warning("签到失败: 账户错误. 该消息没有任何内联按钮.")
+            return
+        self.log.warning(
+            "签到失败: 账户错误. 未找到签到按钮, 当前面板按钮 (序号可用于 bot_checkin_button_index):"
+        )
+        self.log.warning("  " + " | ".join(f"{i}.{text}" for i, text in enumerate(flat, start=1)))
+        self.log.debug(f"按钮回调数据: {[(key.text, key.callback_data) for row in inline for key in row]}")
+
     async def message_handler(self, client, message: Message):
         text = message.caption or message.text
         if await self._advance_button_path(message):
@@ -169,22 +245,22 @@ class TemplateACheckin(BotCheckin):
             )
         ):
             inline = getattr(message.reply_markup, "inline_keyboard", None) or []
-            keys = [k.text for r in inline for k in r]
-            for k in keys:
-                if any(btn in k for btn in self.bot_checkin_button):
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
-                    try:
-                        answer: BotCallbackAnswer = await message.click(k)
-                    except TimeoutError:
-                        self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
-                    except MessageIdInvalid:
-                        pass
-                    else:
-                        await self.on_button_answer(answer)
-                    return
-            else:
-                self.log.warning(f"签到失败: 账户错误.")
+            position = self._find_checkin_button(inline)
+            if position is None:
+                self._log_panel_buttons(inline)
                 return await self.fail()
+            row_index, col_index = position
+            self.log.debug(f"点击签到按钮 [{inline[row_index][col_index].text}].")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            try:
+                answer: BotCallbackAnswer = await message.click(row_index, col_index)
+            except TimeoutError:
+                self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+            except MessageIdInvalid:
+                pass
+            else:
+                await self.on_button_answer(answer)
+            return
 
         if message.text and "请先点击下面加入我们的" in message.text:
             self.log.warning(f"签到失败: 账户错误.")

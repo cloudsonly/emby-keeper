@@ -125,6 +125,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
 | **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
 | **群组签到** | `templ_b` 的 `is_chat` / `wait_response` 已支持「群里发关键字」；但模板里写 `chat_name` 会被静默忽略，模板 A 无法在群里用，私有群数字 ID 也匹配不到 | 新增 `chat_name`（群里跟机器人对话，保留机器人过滤）、模板 A 群签到、站点名支持 `-100...` 数字 ID |
+| **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮 |
 
 合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
 
@@ -186,6 +187,28 @@ bot_checkin_path = ["用户功能", "数据存档"]
 ```
 
 `bot_checkin_path` 会按顺序点击按钮（内联按钮或底部回复键盘都支持），最后一级视为签到按钮；不配置时仍按原来的「在同一条消息里直接找签到按钮」逻辑，找不到会报「账户错误」。
+
+**签到按钮文案每天变**（如 Ask Ash 的「今朝已至」会换成别的词，靠文本匹配永远追不上）：
+
+```toml
+[checkiner."templ_a<ashUniversal_Bot>"]
+name = "Ask Ash"
+templ_panel_keywords = ["用户面板"]      # 先认出面板消息, 不然每条带按钮的消息都会去试
+bot_checkin_path = ["用户功能"]           # 进面板那一级
+bot_checkin_button_index = 8             # 面板里第 8 个按钮 (从左到右、从上到下, 1 起)
+```
+
+`bot_checkin_button_index` 也支持行列坐标：`[4, 2]` 表示第 4 行第 2 列（同样 1 起）。
+
+定位优先级是 **位置 > 正则 > 文本**：
+
+| 配置 | 适用 |
+|---|---|
+| `bot_checkin_button_index = 8` | 文案随便变，位置固定（最省事） |
+| `bot_checkin_button_pat = "^今朝"` | 文案会变但规律可循 |
+| `bot_checkin_button = ["签到", "簽到"]` | 文案固定（默认） |
+
+找不到按钮时会把整块面板的按钮按序号打出来，形如 `1.兑换商店 | 2.删除账号 | ... | 8.今朝已至`，照着填 `bot_checkin_button_index` 即可。
 
 **群组签到**（有些站点只在群里响应，私聊机器人没反应）：
 
