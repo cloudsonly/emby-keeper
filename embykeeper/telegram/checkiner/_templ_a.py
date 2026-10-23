@@ -36,6 +36,7 @@ class TemplateACheckinConfig(BaseModel):
     bot_checkin_button_pat: Optional[str] = None  # 签到按钮文本的正则, 文案不固定时使用
     bot_checkin_button_index: Optional[Union[int, List[int]]] = None  # 签到按钮位置, 1 起
     bot_checkin_button_repeat: Optional[int] = None  # 连续点击次数上限, 用于要反复确认的机器人
+    bot_checkin_button_interval: Optional[float] = None  # 连续点击的间隔秒数, 过快会被机器人节流
     bot_checkin_path: Union[str, List[str]] = None  # 依次点击的按钮文本, 用于需先进子菜单的机器人
     templ_panel_keywords: Union[str, List[str]] = None  # 面板关键词
     # fmt: on
@@ -49,6 +50,7 @@ class TemplateACheckin(BotCheckin):
     bot_checkin_button_pat = None
     bot_checkin_button_index = None
     bot_checkin_button_repeat = 1
+    bot_checkin_button_interval = 0.6
     bot_checkin_path = None
     templ_panel_keywords = None
 
@@ -95,6 +97,8 @@ class TemplateACheckin(BotCheckin):
             self.bot_checkin_button_index = self.t_config.bot_checkin_button_index
         if self.t_config.bot_checkin_button_repeat is not None:
             self.bot_checkin_button_repeat = max(1, int(self.t_config.bot_checkin_button_repeat))
+        if self.t_config.bot_checkin_button_interval is not None:
+            self.bot_checkin_button_interval = max(0.0, float(self.t_config.bot_checkin_button_interval))
         if self.bot_checkin_button_pat:
             try:
                 re.compile(self.bot_checkin_button_pat)
@@ -112,12 +116,14 @@ class TemplateACheckin(BotCheckin):
         self.log = logger.bind(scheme="telechecker", name=self.name, username=self.client.me.full_name)
         self._path_index = 0
         self._checkin_clicks = 0
+        self._active_click_id = None
         return True
 
     async def send_checkin(self, **kw):
         # 每次重新发起签到都从头走按钮路径, 避免重试时路径已走完而卡住.
         self._path_index = 0
         self._checkin_clicks = 0
+        self._active_click_id = None
         return await super().send_checkin(**kw)
 
     async def _advance_button_path(self, message: Message) -> bool:
@@ -244,6 +250,60 @@ class TemplateACheckin(BotCheckin):
         flat = [(r, c) for r, row in enumerate(inline) for c in range(len(row))]
         return flat[0] if len(flat) == 1 else None
 
+    async def _click_checkin(self, message: Message, target: Tuple[int, int]):
+        """点击签到按钮; 需要反复确认时在同一条消息上连续点击.
+
+        这类机器人点一次只回一个原生弹窗 (BotCallbackAnswer.alert) 或悄悄改一下
+        消息, 并不会发新消息. 所以"点一次就 return 等新消息"永远等不到下一步,
+        只会静默超时 —— 必须在这里循环, 直到拿到结果或次数用完.
+        """
+        inline = getattr(message.reply_markup, "inline_keyboard", None) or []
+        row_index, col_index = target
+        total = max(1, int(self.bot_checkin_button_repeat or 1))
+        interval = max(0.0, float(self.bot_checkin_button_interval or 0))
+        message_id = getattr(message, "id", None)
+        self._active_click_id = message_id
+        first = True
+        while self._checkin_clicks < total:
+            # 连点途中机器人发了新消息 (如确认框), 那条消息的 handler 会接管流程,
+            # 这里若继续点旧面板就会和它抢, 表现为连点两次触发节流.
+            if not first and message_id is not None and self._active_click_id != message_id:
+                self.log.debug("签到流程已由新消息接管, 停止在当前消息上连点.")
+                return
+            if row_index >= len(inline) or col_index >= len(inline[row_index]):
+                self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
+                self._log_panel_buttons(inline)
+                return await self.fail()
+            if first:
+                # 首次点击前停顿一下, 避免和上一步 (发命令 / 点菜单) 挤在一起.
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                first = False
+            self._checkin_clicks += 1
+            button_text = inline[row_index][col_index].text
+            self.log.debug(f"点击签到按钮 [{button_text}] ({self._checkin_clicks}/{total}).")
+            try:
+                # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
+                # (内部取 keyboard[y][x]), 与 (行, 列) 的直觉相反. 传反了会报
+                # "The button at position (行, 列) doesn't exist".
+                answer: BotCallbackAnswer = await message.click(col_index, row_index)
+            except ValueError:
+                # 消息在这期间被编辑 / 机器人改了布局, 位置失效.
+                self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
+                self._log_panel_buttons(getattr(message.reply_markup, "inline_keyboard", None) or [])
+                return await self.fail()
+            except TimeoutError:
+                self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+            except MessageIdInvalid:
+                return
+            else:
+                if await self.on_button_answer(answer):
+                    # 已经拿到结果或题目, 不用再点了.
+                    return
+            if self._checkin_clicks >= total:
+                return
+            # 连点间隔: 太短机器人会静默丢弃点击 (或反过来弹节流提示), 太慢又容易超时.
+            await asyncio.sleep(interval)
+
     async def message_handler(self, client, message: Message):
         text = message.caption or message.text
         if await self._advance_button_path(message):
@@ -284,30 +344,7 @@ class TemplateACheckin(BotCheckin):
                     # 这里判失败会把正常的中间菜单误杀, 所以只打日志, 交给超时兜底.
                     self._log_panel_buttons(inline)
                     return
-                self._checkin_clicks += 1
-                row_index, col_index = target
-                self.log.debug(
-                    f"点击签到按钮 [{inline[row_index][col_index].text}] "
-                    f"({self._checkin_clicks}/{self.bot_checkin_button_repeat})."
-                )
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-                try:
-                    # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
-                    # (内部取 keyboard[y][x]), 与 (行, 列) 的直觉相反. 传反了会报
-                    # "The button at position (行, 列) doesn't exist".
-                    answer: BotCallbackAnswer = await message.click(col_index, row_index)
-                except ValueError:
-                    # 消息在这期间被编辑 / 机器人改了布局, 位置失效.
-                    self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
-                    self._log_panel_buttons(getattr(message.reply_markup, "inline_keyboard", None) or [])
-                    return await self.fail()
-                except TimeoutError:
-                    self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
-                except MessageIdInvalid:
-                    pass
-                else:
-                    await self.on_button_answer(answer)
-                return
+                return await self._click_checkin(message, target)
             # 普通带按钮的消息 (公告 / 广告 / 其它菜单) 不归这里管, 交给通用处理.
             self.log.debug("消息带按钮但未识别为签到面板, 交给通用处理.")
 
@@ -326,20 +363,30 @@ class TemplateACheckin(BotCheckin):
         """
         return self.is_challenge_text(text) or self.is_result_text(text)
 
-    async def on_button_answer(self, answer: BotCallbackAnswer, from_path: bool = False):
-        if self.use_button_answer:
-            if not isinstance(answer, BotCallbackAnswer):
-                self.log.warning(f"签到失败: 签到按钮指向 URL, 不受支持.")
-                return await self.fail()
-            if answer.message and not any(ignore in answer.message for ignore in self.bot_text_ignore_answer):
-                # 导航点击、以及连点过程中还没到最后一次的提示, 都只是"过场".
-                # 交给 on_text 会落到"无法识别 → 智能回答", 那条分支一旦让模型
-                # 点了按钮就会以"避免风险"中止整个签到.
-                intermediate = from_path or (0 < self._checkin_clicks < self.bot_checkin_button_repeat)
-                if intermediate and not self._is_meaningful_answer(answer.message):
-                    self.log.debug(f"忽略中间步骤的提示: {answer.message}")
-                    return
-                await self.on_text(Message(id=0, text=answer.message), answer.message)
+    async def on_button_answer(self, answer: BotCallbackAnswer, from_path: bool = False) -> bool:
+        """处理点击按钮的回调提示, 返回是否已作为结果/题目交给 on_text.
+
+        返回 True 表示流程可以结束 (已经拿到结果, 或这个按钮本身就指向 URL),
+        连点循环据此停止; 返回 False 表示只是过场提示, 可以继续点.
+        """
+        if not self.use_button_answer:
+            return False
+        if not isinstance(answer, BotCallbackAnswer):
+            self.log.warning(f"签到失败: 签到按钮指向 URL, 不受支持.")
+            await self.fail()
+            return True
+        text = getattr(answer, "message", None)
+        if not text or any(ignore in text for ignore in self.bot_text_ignore_answer):
+            return False
+        # 导航点击、以及连点过程中还没到最后一次的提示, 都只是"过场".
+        # 交给 on_text 会落到"无法识别 → 智能回答", 那条分支一旦让模型
+        # 点了按钮就会以"避免风险"中止整个签到.
+        intermediate = from_path or (0 < self._checkin_clicks < self.bot_checkin_button_repeat)
+        if intermediate and not self._is_meaningful_answer(text):
+            self.log.debug(f"忽略中间步骤的提示: {text}")
+            return False
+        await self.on_text(Message(id=0, text=text), text)
+        return True
 
 
 def use(**kw):

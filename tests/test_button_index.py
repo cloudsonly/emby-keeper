@@ -39,12 +39,15 @@ class FakeMarkup:
 
 
 class FakeMessage:
-    def __init__(self, rows, text="欢迎进入用户面板！San"):
+    def __init__(self, rows, text="欢迎进入用户面板！San", answers=None, message_id=None):
         self.reply_markup = FakeMarkup(rows)
         self.text = text
         self.caption = None
         self.edit_date = None
+        self.id = message_id
         self.clicked = []
+        # 每次点击依次返回这里的回调结果, 用完后回退成按钮文字.
+        self.answers = list(answers or [])
 
     async def click(self, x, y=None):
         # 与 pyrogram 一致: x 是列, y 是行, 内部取 keyboard[y][x].
@@ -58,6 +61,8 @@ class FakeMessage:
         except IndexError:
             raise ValueError(f"The button at position ({x}, {y}) doesn't exist")
         self.clicked.append((x, y))
+        if self.answers:
+            return self.answers.pop(0)
         return button.text
 
 
@@ -78,6 +83,17 @@ class FakeAsyncIO:
         return None
 
 
+class RecordingAsyncIO:
+    """记录每次 sleep 的时长, 用来验证连点间隔真的生效."""
+
+    def __init__(self):
+        self.sleeps = []
+
+    async def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        return None
+
+
 @pytest.fixture
 def fast_sleep(monkeypatch):
     monkeypatch.setattr(_templ_a, "asyncio", FakeAsyncIO)
@@ -90,7 +106,9 @@ def make_checkin(**kw):
     inst.bot_checkin_path = None
     inst._path_index = 0
     inst._checkin_clicks = 0
+    inst._active_click_id = None
     inst.bot_checkin_button_repeat = 1
+    inst.bot_checkin_button_interval = 0.6
     inst.templ_panel_keywords = ["用户面板"]
     inst.bot_checkin_button = ["签到", "簽到"]
     inst.bot_checkin_button_pat = None
@@ -99,7 +117,9 @@ def make_checkin(**kw):
     inst.answers = []
 
     async def on_button_answer(answer):
+        # 与真实实现一致: 返回 False 表示"只是过场提示, 可以继续点".
         inst.answers.append(answer)
+        return False
 
     async def fail():
         inst.failed.append(True)
@@ -238,27 +258,91 @@ def test_checkin_button_is_clicked_only_once(fast_sleep):
     assert inst.answers == ["到此一游"]
 
 
-def test_repeat_clicks_until_limit(fast_sleep):
-    """需要反复确认的机器人: 同一个位置可以连点, 次数用完就停."""
+def test_repeat_clicks_within_one_handler(fast_sleep):
+    """连点必须在同一条消息上循环完成.
+
+    这类机器人点一次只回一个原生弹窗或悄悄改一下消息, 不会发新消息.
+    "点一次就 return 等新消息"永远等不到下一步, 只会静默超时.
+    """
     inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
-    for _ in range(5):
-        message = FakeMessage(PANEL)
-        run(inst.message_handler(None, message))
-        if message.clicked:
-            assert message.clicked == [(1, 3)]
+    message = FakeMessage(PANEL)
+    run(inst.message_handler(None, message))
+    assert message.clicked == [(1, 3), (1, 3), (1, 3)]
     assert inst._checkin_clicks == 3
+
+
+def test_no_more_clicks_after_limit(fast_sleep):
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=2)
+    inst._checkin_clicks = 2
+    message = FakeMessage(PANEL)
+    run(inst.message_handler(None, message))
+    assert message.clicked == []
 
 
 def test_repeat_mode_clicks_single_button_confirm_dialog(fast_sleep):
     """确认框只有一个按钮、位置也对不上时, 靠"只有一个"来认."""
     inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
-    run(inst.message_handler(None, FakeMessage(PANEL)))
-    assert inst._checkin_clicks == 1
-
+    inst._checkin_clicks = 1  # 面板已点过一次, 还差 2 次
     confirm = FakeMessage([["✅ 确认"]], text="确定要签到吗?")
     run(inst.message_handler(None, confirm))
-    assert confirm.clicked == [(0, 0)]
-    assert inst._checkin_clicks == 2
+    assert confirm.clicked == [(0, 0), (0, 0)]
+    assert inst._checkin_clicks == 3
+
+
+def test_interval_is_used_between_repeat_clicks(monkeypatch):
+    """两次点击之间要按 bot_checkin_button_interval 等待, 太快会被机器人节流."""
+    recorder = RecordingAsyncIO()
+    monkeypatch.setattr(_templ_a, "asyncio", recorder)
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
+    inst.bot_checkin_button_interval = 0.2
+    message = FakeMessage(PANEL)
+    run(inst.message_handler(None, message))
+    assert len(message.clicked) == 3
+    # sleeps[0] 是首次点击前的随机停顿, 之后才是固定间隔
+    assert recorder.sleeps[1:] == [0.2, 0.2]
+
+
+def test_alert_popup_does_not_stop_the_loop(fast_sleep):
+    """原生 alert 弹窗 (alert=True) 不是新消息, 处理完要继续点."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
+    inst.use_button_answer = True
+    inst.bot_text_ignore_answer = ["Done"]
+    inst.is_result_text = lambda text: "成功" in text
+    inst.texts = []
+
+    async def on_text(message, text=None):
+        inst.texts.append(text if text is not None else message.text)
+
+    inst.on_text = on_text
+    inst.on_button_answer = TemplateACheckin.on_button_answer.__get__(inst, TemplateACheckin)
+
+    message = FakeMessage(
+        PANEL,
+        answers=[
+            BotCallbackAnswer(cache_time=0, message="请确认是否签到", alert=True),
+            BotCallbackAnswer(cache_time=0, message="稳如老狗，奖励稳稳的！", alert=True),
+            BotCallbackAnswer(cache_time=0, message="签到成功", alert=True),
+        ],
+    )
+    run(inst.message_handler(None, message))
+    assert len(message.clicked) == 3
+    # 中间两次弹窗只是过场, 只有最后的结果交给 on_text
+    assert inst.texts == ["签到成功"]
+
+
+def test_loop_stops_when_new_message_takes_over(fast_sleep):
+    """连点途中机器人发了新消息 (确认框), 那条消息的 handler 会接管, 旧面板要停手."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=5)
+
+    async def on_button_answer(answer):
+        # 模拟另一条消息的 handler 抢走了流程
+        inst._active_click_id = 200
+        return False
+
+    inst.on_button_answer = on_button_answer
+    message = FakeMessage(PANEL, message_id=100)
+    run(inst.message_handler(None, message))
+    assert message.clicked == [(1, 3)]
 
 
 def test_repeat_mode_ignores_flavour_toast(fast_sleep):
