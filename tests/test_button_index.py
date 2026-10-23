@@ -89,6 +89,7 @@ def make_checkin(**kw):
     inst.log = logger.bind(name="test")
     inst.bot_checkin_path = None
     inst._path_index = 0
+    inst._checkin_clicked = False
     inst.templ_panel_keywords = ["用户面板"]
     inst.bot_checkin_button = ["签到", "簽到"]
     inst.bot_checkin_button_pat = None
@@ -202,12 +203,65 @@ def test_handler_clicks_by_position(fast_sleep):
     assert inst.failed == []
 
 
-def test_handler_fails_when_unmatched(fast_sleep):
-    inst = make_checkin()
-    message = FakeMessage(PANEL)
+def test_handler_does_not_fail_on_menu_without_checkin_button(fast_sleep):
+    """关键词命中了但这条消息上没有签到按钮 (进面板前的菜单), 不能直接判失败."""
+    inst = make_checkin(templ_panel_keywords="请选择功能")
+    # 菜单: 只有 2 行, 没有 "签到" 按钮
+    message = FakeMessage([["用户功能", "服务器"], ["来者不拒"]], text="你好呀 San 请选择功能")
     run(inst.message_handler(None, message))
     assert message.clicked == []
-    assert inst.failed == [True]
+    assert inst.failed == []
+
+
+def test_index_alone_is_enough_without_panel_keyword(fast_sleep):
+    """面板文案写错了也没关系: 配了按钮位置, 位置存在的消息就当面板."""
+    inst = make_checkin(bot_checkin_button_index=8, templ_panel_keywords="请选择功能")
+    message = FakeMessage(PANEL, text="▎欢迎进入用户面板！San")  # 不含 "请选择功能"
+    run(inst.message_handler(None, message))
+    assert message.clicked == [(1, 3)]
+    assert inst.answers == ["到此一游"]
+
+
+def test_checkin_button_is_clicked_only_once(fast_sleep):
+    """点完机器人会改一次面板, 不能重复点 (否则会被记成 "今日已签到")."""
+    inst = make_checkin(bot_checkin_button_index=8)
+    first = FakeMessage(PANEL)
+    run(inst.message_handler(None, first))
+    assert first.clicked == [(1, 3)]
+
+    updated = [row[:] for row in PANEL]
+    updated[3][1] = "今日已至"
+    second = FakeMessage(updated)
+    run(inst.message_handler(None, second))
+    assert second.clicked == []
+    assert inst.answers == ["到此一游"]
+
+
+def test_checkin_clicked_flag_resets_between_runs(monkeypatch):
+    inst = make_checkin()
+    inst._checkin_clicked = True
+
+    async def fake_send_checkin(self, **kw):
+        return None
+
+    monkeypatch.setattr(BotCheckin, "send_checkin", fake_send_checkin)
+    run(inst.send_checkin())
+    assert inst._checkin_clicked is False
+
+
+def test_unrelated_button_message_falls_through(fast_sleep, monkeypatch):
+    """既不是面板也不是菜单的带按钮消息, 应交给通用处理而不是被吞掉."""
+    handled = []
+
+    async def fake_base_handler(self, client, message, type=None):
+        handled.append(message.text)
+
+    monkeypatch.setattr(BotCheckin, "message_handler", fake_base_handler)
+    inst = make_checkin(bot_checkin_button_index=8)
+    message = FakeMessage([["确定"]], text="签到成功")
+    run(inst.message_handler(None, message))
+    assert message.clicked == []
+    assert handled == ["签到成功"]
 
 
 def test_stale_position_fails_gracefully(fast_sleep):
@@ -244,14 +298,14 @@ def test_log_handles_message_without_buttons():
 
 
 def test_handler_ignores_messages_without_panel_keyword(fast_sleep, monkeypatch):
-    """面板关键词不匹配的消息应交给基类, 不能在这里抢答."""
+    """没配按钮位置时, 面板关键词不匹配的消息应交给基类, 不能在这里抢答."""
     handled = []
 
     async def fake_base_handler(self, client, message, type=None):
         handled.append(message.text)
 
     monkeypatch.setattr(BotCheckin, "message_handler", fake_base_handler)
-    inst = make_checkin(bot_checkin_button_index=8)
+    inst = make_checkin()  # 只靠关键词, 不配位置
     message = FakeMessage(PANEL, text="完全无关的聊天内容")
     run(inst.message_handler(None, message))
     assert message.clicked == []

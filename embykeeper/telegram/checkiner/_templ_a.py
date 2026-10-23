@@ -107,11 +107,13 @@ class TemplateACheckin(BotCheckin):
 
         self.log = logger.bind(scheme="telechecker", name=self.name, username=self.client.me.full_name)
         self._path_index = 0
+        self._checkin_clicked = False
         return True
 
     async def send_checkin(self, **kw):
         # 每次重新发起签到都从头走按钮路径, 避免重试时路径已走完而卡住.
         self._path_index = 0
+        self._checkin_clicked = False
         return await super().send_checkin(**kw)
 
     async def _advance_button_path(self, message: Message) -> bool:
@@ -232,43 +234,58 @@ class TemplateACheckin(BotCheckin):
         text = message.caption or message.text
         if await self._advance_button_path(message):
             return
-        if (
-            text
-            and message.reply_markup
-            and not self.is_challenge_text(text)
-            and (
-                (
-                    self.templ_panel_keywords
-                    and any(keyword in text for keyword in to_iterable(self.templ_panel_keywords))
-                )
-                or (getattr(message, "is_first_response", False) and not message.edit_date)
-            )
-        ):
+        if message.reply_markup and not self.is_challenge_text(text or ""):
             inline = getattr(message.reply_markup, "inline_keyboard", None) or []
-            position = self._find_checkin_button(inline)
-            if position is None:
-                self._log_panel_buttons(inline)
-                return await self.fail()
-            row_index, col_index = position
-            self.log.debug(f"点击签到按钮 [{inline[row_index][col_index].text}].")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            try:
-                # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
-                # (内部取 keyboard[y][x]), 与 (行, 列) 的直觉相反. 传反了会报
-                # "The button at position (行, 列) doesn't exist".
-                answer: BotCallbackAnswer = await message.click(col_index, row_index)
-            except ValueError:
-                # 消息在这期间被编辑 / 机器人改了布局, 位置失效.
-                self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
-                self._log_panel_buttons(getattr(message.reply_markup, "inline_keyboard", None) or [])
-                return await self.fail()
-            except TimeoutError:
-                self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
-            except MessageIdInvalid:
-                pass
-            else:
-                await self.on_button_answer(answer)
-            return
+            position = self._find_checkin_button(inline) if inline else None
+            content = text or ""
+            matched_panel = bool(
+                self.templ_panel_keywords
+                and any(keyword in content for keyword in to_iterable(self.templ_panel_keywords))
+            )
+            # 面板关键词写错或没写时, 只要按位置/正则能定位到签到按钮, 这条就是面板.
+            # 否则会落到 "无法识别 → 智能回答" 分支, 而该分支一旦让模型点了按钮
+            # 就会以 "避免风险" 为由中止整个签到.
+            located_panel = position is not None and (
+                self.bot_checkin_button_index is not None or bool(self.bot_checkin_button_pat)
+            )
+            if (
+                matched_panel
+                or located_panel
+                or (getattr(message, "is_first_response", False) and not message.edit_date)
+            ):
+                if position is None:
+                    # 关键词命中了但这条消息上没有签到按钮 (常见于进面板前的那层菜单).
+                    # 这里判失败会把正常的中间菜单误杀, 所以只打日志, 交给超时兜底.
+                    self._log_panel_buttons(inline)
+                    return
+                if self._checkin_clicked:
+                    # 点过之后机器人常会改一次面板 (按钮变成 "已签到"), 再点会拿到
+                    # "今日已签到" 并被记成 NONEED, 所以同一次运行只点一次.
+                    self.log.debug("本次已点过签到按钮, 忽略重复的面板消息.")
+                    return
+                self._checkin_clicked = True
+                row_index, col_index = position
+                self.log.debug(f"点击签到按钮 [{inline[row_index][col_index].text}].")
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                try:
+                    # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
+                    # (内部取 keyboard[y][x]), 与 (行, 列) 的直觉相反. 传反了会报
+                    # "The button at position (行, 列) doesn't exist".
+                    answer: BotCallbackAnswer = await message.click(col_index, row_index)
+                except ValueError:
+                    # 消息在这期间被编辑 / 机器人改了布局, 位置失效.
+                    self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
+                    self._log_panel_buttons(getattr(message.reply_markup, "inline_keyboard", None) or [])
+                    return await self.fail()
+                except TimeoutError:
+                    self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
+                except MessageIdInvalid:
+                    pass
+                else:
+                    await self.on_button_answer(answer)
+                return
+            # 普通带按钮的消息 (公告 / 广告 / 其它菜单) 不归这里管, 交给通用处理.
+            self.log.debug("消息带按钮但未识别为签到面板, 交给通用处理.")
 
         if message.text and "请先点击下面加入我们的" in message.text:
             self.log.warning(f"签到失败: 账户错误.")
