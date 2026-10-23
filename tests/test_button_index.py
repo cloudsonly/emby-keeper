@@ -89,7 +89,8 @@ def make_checkin(**kw):
     inst.log = logger.bind(name="test")
     inst.bot_checkin_path = None
     inst._path_index = 0
-    inst._checkin_clicked = False
+    inst._checkin_clicks = 0
+    inst.bot_checkin_button_repeat = 1
     inst.templ_panel_keywords = ["用户面板"]
     inst.bot_checkin_button = ["签到", "簽到"]
     inst.bot_checkin_button_pat = None
@@ -223,7 +224,7 @@ def test_index_alone_is_enough_without_panel_keyword(fast_sleep):
 
 
 def test_checkin_button_is_clicked_only_once(fast_sleep):
-    """点完机器人会改一次面板, 不能重复点 (否则会被记成 "今日已签到")."""
+    """默认只点一次: 点完机器人会改一次面板, 再点会被记成 "今日已签到"."""
     inst = make_checkin(bot_checkin_button_index=8)
     first = FakeMessage(PANEL)
     run(inst.message_handler(None, first))
@@ -237,16 +238,83 @@ def test_checkin_button_is_clicked_only_once(fast_sleep):
     assert inst.answers == ["到此一游"]
 
 
-def test_checkin_clicked_flag_resets_between_runs(monkeypatch):
+def test_repeat_clicks_until_limit(fast_sleep):
+    """需要反复确认的机器人: 同一个位置可以连点, 次数用完就停."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
+    for _ in range(5):
+        message = FakeMessage(PANEL)
+        run(inst.message_handler(None, message))
+        if message.clicked:
+            assert message.clicked == [(1, 3)]
+    assert inst._checkin_clicks == 3
+
+
+def test_repeat_mode_clicks_single_button_confirm_dialog(fast_sleep):
+    """确认框只有一个按钮、位置也对不上时, 靠"只有一个"来认."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
+    run(inst.message_handler(None, FakeMessage(PANEL)))
+    assert inst._checkin_clicks == 1
+
+    confirm = FakeMessage([["✅ 确认"]], text="确定要签到吗?")
+    run(inst.message_handler(None, confirm))
+    assert confirm.clicked == [(0, 0)]
+    assert inst._checkin_clicks == 2
+
+
+def test_repeat_mode_ignores_flavour_toast(fast_sleep):
+    """连点过程中的吉祥话回执不能交给智能回答 (那会让模型点按钮并中止签到)."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=3)
+    inst.use_button_answer = True
+    inst.bot_text_ignore_answer = ["Done"]
+    inst.texts = []
+
+    async def on_text(message, text=None):
+        inst.texts.append(text if text is not None else message.text)
+
+    inst.on_text = on_text
+    inst.on_button_answer = TemplateACheckin.on_button_answer.__get__(inst, TemplateACheckin)
+    inst.is_challenge_text = lambda text: False
+    inst.is_result_text = lambda text: any(k in text for k in ("签到成功", "失败", "已签到"))
+
+    from pyrogram.raw.types.messages import BotCallbackAnswer as Answer
+
+    inst._checkin_clicks = 1  # 还有 2 次没点, 属于中间步骤
+    run(inst.on_button_answer(Answer(cache_time=0, message="稳如老狗，奖励稳稳的！")))
+    assert inst.texts == []
+
+    # 最后一次点击的回执要正常处理
+    inst._checkin_clicks = 3
+    run(inst.on_button_answer(Answer(cache_time=0, message="签到成功")))
+    assert inst.texts == ["签到成功"]
+
+
+def test_repeat_mode_processes_result_text_after_clicks_exhausted(fast_sleep):
+    """点击次数用完后, 结果文字挂在带按钮的消息上也要能认出来."""
+    inst = make_checkin(bot_checkin_button_index=8, bot_checkin_button_repeat=2)
+    inst._checkin_clicks = 2
+    inst.is_result_text = lambda text: "签到成功" in text
+    inst.texts = []
+
+    async def on_text(message, text=None):
+        inst.texts.append(text if text is not None else message.text)
+
+    inst.on_text = on_text
+    message = FakeMessage(PANEL, text="🎉 签到成功 | 3 问币")
+    run(inst.message_handler(None, message))
+    assert message.clicked == []
+    assert inst.texts == ["🎉 签到成功 | 3 问币"]
+
+
+def test_checkin_clicks_reset_between_runs(monkeypatch):
     inst = make_checkin()
-    inst._checkin_clicked = True
+    inst._checkin_clicks = 3
 
     async def fake_send_checkin(self, **kw):
         return None
 
     monkeypatch.setattr(BotCheckin, "send_checkin", fake_send_checkin)
     run(inst.send_checkin())
-    assert inst._checkin_clicked is False
+    assert inst._checkin_clicks == 0
 
 
 def test_unrelated_button_message_falls_through(fast_sleep, monkeypatch):

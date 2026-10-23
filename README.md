@@ -125,7 +125,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
 | **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
 | **群组签到** | `templ_b` 的 `is_chat` / `wait_response` 已支持「群里发关键字」；但模板里写 `chat_name` 会被静默忽略，模板 A 无法在群里用，私有群数字 ID 也匹配不到 | 新增 `chat_name`（群里跟机器人对话，保留机器人过滤）、模板 A 群签到、站点名支持 `-100...` 数字 ID |
-| **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮 |
+| **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮；`bot_checkin_button_repeat` 支持连点直到成功 |
 | **结果关键词** | 只做子串匹配 | 支持 `re:` 前缀写正则，应对每次随机生成的吉祥话回执 |
 
 合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
@@ -211,7 +211,23 @@ bot_checkin_button_index = 8             # 面板里第 8 个按钮 (从左到�
 | `bot_checkin_button_pat = "^今朝"` | 文案会变但规律可循 |
 | `bot_checkin_button = ["签到", "簽到"]` | 文案固定（默认） |
 
-找不到按钮时会把整块面板的按钮按序号打出来，形如 `1.兑换商店 | 2.删除账号 | ... | 8.今朝已至`，照着填 `bot_checkin_button_index` 即可。同一次运行只会点一次签到按钮——点完机器人通常会把面板改成「已签到」，再点会被记成「今日已签到」而不是成功。
+找不到按钮时会把整块面板的按钮按序号打出来，形如 `1.兑换商店 | 2.删除账号 | ... | 8.今朝已至`，照着填 `bot_checkin_button_index` 即可。
+
+**需要连点几次才成功的机器人**（点一下弹个确认框，确认后再点，往复几次）：
+
+```toml
+[checkiner."templ_a<ashUniversal_Bot>"]
+name = "Ask Ash 面板签到"
+bot_checkin_button_index = [2, 1]   # /start 面板上那个每天换词的按钮
+bot_checkin_button_repeat = 6       # 最多连点 6 次, 出现成功消息就提前结束
+```
+
+`bot_checkin_button_repeat` 默认是 `1`，也就是只点一次。调大之后：
+
+- 每次点击弹出新消息时，会继续按同一个位置点；
+- 弹出的确认框如果只有一个按钮（位置对不上），就直接点它；
+- 连点过程中的过场提示（如「稳如老狗，奖励稳稳的！」）会被忽略，不会送进智能回答——否则模型一旦点了按钮就会以「避免风险」中止签到；
+- 次数用完后不再点击，只从消息文字里认结果。
 
 `bot_checkin_path` 每一级点击的回调提示，只有在含「成功 / 失败 / 已签到」或「请回答」这类字样时才会被当成结果处理；像进菜单时那句 `✅ 用户界面` 会被静默忽略。否则它会落到「无法识别 → 智能回答」的兜底分支，而该分支一旦让模型点了按钮，就会以「避免风险」为由中止整个签到。
 

@@ -35,6 +35,7 @@ class TemplateACheckinConfig(BaseModel):
     bot_checkin_button: Union[str, List[str]] = None  # 签到按钮文本
     bot_checkin_button_pat: Optional[str] = None  # 签到按钮文本的正则, 文案不固定时使用
     bot_checkin_button_index: Optional[Union[int, List[int]]] = None  # 签到按钮位置, 1 起
+    bot_checkin_button_repeat: Optional[int] = None  # 连续点击次数上限, 用于要反复确认的机器人
     bot_checkin_path: Union[str, List[str]] = None  # 依次点击的按钮文本, 用于需先进子菜单的机器人
     templ_panel_keywords: Union[str, List[str]] = None  # 面板关键词
     # fmt: on
@@ -47,6 +48,7 @@ class TemplateACheckin(BotCheckin):
     bot_checkin_button = ["签到", "簽到"]
     bot_checkin_button_pat = None
     bot_checkin_button_index = None
+    bot_checkin_button_repeat = 1
     bot_checkin_path = None
     templ_panel_keywords = None
 
@@ -91,6 +93,8 @@ class TemplateACheckin(BotCheckin):
         self.bot_checkin_button_pat = self.t_config.bot_checkin_button_pat or self.bot_checkin_button_pat
         if self.t_config.bot_checkin_button_index is not None:
             self.bot_checkin_button_index = self.t_config.bot_checkin_button_index
+        if self.t_config.bot_checkin_button_repeat is not None:
+            self.bot_checkin_button_repeat = max(1, int(self.t_config.bot_checkin_button_repeat))
         if self.bot_checkin_button_pat:
             try:
                 re.compile(self.bot_checkin_button_pat)
@@ -107,13 +111,13 @@ class TemplateACheckin(BotCheckin):
 
         self.log = logger.bind(scheme="telechecker", name=self.name, username=self.client.me.full_name)
         self._path_index = 0
-        self._checkin_clicked = False
+        self._checkin_clicks = 0
         return True
 
     async def send_checkin(self, **kw):
         # 每次重新发起签到都从头走按钮路径, 避免重试时路径已走完而卡住.
         self._path_index = 0
-        self._checkin_clicked = False
+        self._checkin_clicks = 0
         return await super().send_checkin(**kw)
 
     async def _advance_button_path(self, message: Message) -> bool:
@@ -230,6 +234,16 @@ class TemplateACheckin(BotCheckin):
         self.log.warning("  " + " | ".join(f"{i}.{text}" for i, text in enumerate(flat, start=1)))
         self.log.debug(f"按钮回调数据: {[(key.text, key.callback_data) for row in inline for key in row]}")
 
+    @staticmethod
+    def _pick_only_button(inline) -> Optional[Tuple[int, int]]:
+        """消息上只有一个按钮时直接返回它.
+
+        需要反复确认的机器人, 每次点击后弹的确认框往往只有一个按钮 (「确认」),
+        而它的位置和文案都不固定, 只能靠"只有一个"来认.
+        """
+        flat = [(r, c) for r, row in enumerate(inline) for c in range(len(row))]
+        return flat[0] if len(flat) == 1 else None
+
     async def message_handler(self, client, message: Message):
         text = message.caption or message.text
         if await self._advance_button_path(message):
@@ -248,24 +262,34 @@ class TemplateACheckin(BotCheckin):
             located_panel = position is not None and (
                 self.bot_checkin_button_index is not None or bool(self.bot_checkin_button_pat)
             )
+            repeat_mode = self.bot_checkin_button_repeat > 1
             if (
                 matched_panel
                 or located_panel
                 or (getattr(message, "is_first_response", False) and not message.edit_date)
+                # 连点模式下, 每次点击弹出的确认框也是带按钮的消息, 都要参与.
+                or (repeat_mode and inline and self._checkin_clicks < self.bot_checkin_button_repeat)
             ):
-                if position is None:
+                if self._checkin_clicks >= self.bot_checkin_button_repeat:
+                    # 点击次数用完了, 但结果可能就挂在这条消息的文字里.
+                    if self.is_result_text(content):
+                        await self.on_text(message, content)
+                    return
+                target = position
+                if target is None and repeat_mode:
+                    # 确认框: 位置对不上但整条消息只有一个按钮, 那就点它.
+                    target = self._pick_only_button(inline)
+                if target is None:
                     # 关键词命中了但这条消息上没有签到按钮 (常见于进面板前的那层菜单).
                     # 这里判失败会把正常的中间菜单误杀, 所以只打日志, 交给超时兜底.
                     self._log_panel_buttons(inline)
                     return
-                if self._checkin_clicked:
-                    # 点过之后机器人常会改一次面板 (按钮变成 "已签到"), 再点会拿到
-                    # "今日已签到" 并被记成 NONEED, 所以同一次运行只点一次.
-                    self.log.debug("本次已点过签到按钮, 忽略重复的面板消息.")
-                    return
-                self._checkin_clicked = True
-                row_index, col_index = position
-                self.log.debug(f"点击签到按钮 [{inline[row_index][col_index].text}].")
+                self._checkin_clicks += 1
+                row_index, col_index = target
+                self.log.debug(
+                    f"点击签到按钮 [{inline[row_index][col_index].text}] "
+                    f"({self._checkin_clicks}/{self.bot_checkin_button_repeat})."
+                )
                 await asyncio.sleep(random.uniform(0.5, 1.5))
                 try:
                     # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
@@ -308,8 +332,12 @@ class TemplateACheckin(BotCheckin):
                 self.log.warning(f"签到失败: 签到按钮指向 URL, 不受支持.")
                 return await self.fail()
             if answer.message and not any(ignore in answer.message for ignore in self.bot_text_ignore_answer):
-                if from_path and not self._is_meaningful_answer(answer.message):
-                    self.log.debug(f"忽略导航按钮的提示: {answer.message}")
+                # 导航点击、以及连点过程中还没到最后一次的提示, 都只是"过场".
+                # 交给 on_text 会落到"无法识别 → 智能回答", 那条分支一旦让模型
+                # 点了按钮就会以"避免风险"中止整个签到.
+                intermediate = from_path or (0 < self._checkin_clicks < self.bot_checkin_button_repeat)
+                if intermediate and not self._is_meaningful_answer(answer.message):
+                    self.log.debug(f"忽略中间步骤的提示: {answer.message}")
                     return
                 await self.on_text(Message(id=0, text=answer.message), answer.message)
 
