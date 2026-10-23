@@ -45,6 +45,31 @@ __ignore__ = True
 
 logger = logger.bind(scheme="telechecker")
 
+REGEX_KEYWORD_PREFIX = "re:"
+
+
+def keyword_match(text: str, keywords: Iterable[str]) -> bool:
+    """关键词匹配, 以 "re:" 开头的条目按正则处理.
+
+    有些机器人每次回复都是随机文案 (如签到回执 "稳如老狗, 奖励稳稳的!" 每天换一个
+    成语), 固定关键词追不上. 写成 "re:奖励|红包|到账" 就能一次覆盖.
+    """
+    if not text:
+        return False
+    for keyword in keywords:
+        if keyword.startswith(REGEX_KEYWORD_PREFIX):
+            pattern = keyword[len(REGEX_KEYWORD_PREFIX) :]
+            try:
+                if re.search(pattern, text):
+                    return True
+            except re.error:
+                # 写错的正则不该让整次签到崩掉, 当作没匹配.
+                continue
+        elif keyword in text:
+            return True
+    return False
+
+
 default_keywords = {
     "account_fail": (
         "拉黑",
@@ -579,7 +604,7 @@ class BotCheckin(BaseBotCheckin):
             return False
         for name in ("success", "fail", "checked", "account_fail", "too_many_tries_fail"):
             keywords = to_iterable(getattr(self, f"bot_{name}_keywords", [])) or default_keywords[name]
-            if any(s in text for s in keywords):
+            if keyword_match(text, keywords):
                 return True
         return False
 
@@ -675,7 +700,7 @@ class BotCheckin(BaseBotCheckin):
         if not text:
             return False
         keywords = to_iterable(self.bot_challenge_keywords) or default_keywords["challenge"]
-        if any(s in text for s in keywords):
+        if keyword_match(text, keywords):
             return True
         # NFKC 把全角 "８－５＝" 归一成 "8-5=", 否则中文站点用全角符号会漏判.
         normalized = unicodedata.normalize("NFKC", text)
@@ -687,12 +712,12 @@ class BotCheckin(BaseBotCheckin):
         """接收非验证码消息时, 检测关键词并确认签到成功或失败, 发送用户提示."""
         if not text:
             return
-        if self.bot_captcha_error_keywords and any(
-            s in text for s in to_iterable(self.bot_captcha_error_keywords)
+        if self.bot_captcha_error_keywords and keyword_match(
+            text, to_iterable(self.bot_captcha_error_keywords)
         ):
             if await self.on_captcha_error(message, text):
                 return
-        if any(s in text for s in to_iterable(self.bot_text_ignore)):
+        if keyword_match(text, to_iterable(self.bot_text_ignore)):
             pass
         elif self.is_challenge_text(text):
             if self._challenge_pending:
@@ -713,25 +738,24 @@ class BotCheckin(BaseBotCheckin):
             if pending:
                 self.log.info(f"处理作答期间收到的成功消息: {truncate_str(pending, 40)}")
                 await self.on_text(None, pending)
-        elif any(
-            s in text for s in to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
+        elif keyword_match(
+            text, to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
         ):
             self.log.warning(f"签到失败: 账户错误.")
             await self.fail()
-        elif any(
-            s in text
-            for s in to_iterable(self.bot_too_many_tries_fail_keywords)
-            or default_keywords["too_many_tries_fail"]
+        elif keyword_match(
+            text,
+            to_iterable(self.bot_too_many_tries_fail_keywords) or default_keywords["too_many_tries_fail"],
         ):
             self.log.warning(f"签到失败: 尝试次数过多.")
             await self.fail()
-        elif any(s in text for s in to_iterable(self.bot_checked_keywords) or default_keywords["checked"]):
+        elif keyword_match(text, to_iterable(self.bot_checked_keywords) or default_keywords["checked"]):
             self.log.info(f"今日已经签到过了.")
             await self.finish(RunStatus.NONEED, "今日已签到")
-        elif any(s in text for s in to_iterable(self.bot_fail_keywords) or default_keywords["fail"]):
+        elif keyword_match(text, to_iterable(self.bot_fail_keywords) or default_keywords["fail"]):
             self.log.info(f"签到失败: 验证码错误或网络错误, 正在重试.")
             await self.retry()
-        elif any(s in text for s in to_iterable(self.bot_success_keywords) or default_keywords["success"]):
+        elif keyword_match(text, to_iterable(self.bot_success_keywords) or default_keywords["success"]):
             if self._challenge_pending:
                 # 机器人常把 "请完成诗句填空进行验证" 这类提示单独发一条, 里面带 "完成".
                 # 此时智能回答可能还在点按钮, 直接判成功会取消它, 直接丢弃又会一直等到超时,

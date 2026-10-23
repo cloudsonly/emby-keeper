@@ -126,6 +126,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
 | **群组签到** | `templ_b` 的 `is_chat` / `wait_response` 已支持「群里发关键字」；但模板里写 `chat_name` 会被静默忽略，模板 A 无法在群里用，私有群数字 ID 也匹配不到 | 新增 `chat_name`（群里跟机器人对话，保留机器人过滤）、模板 A 群签到、站点名支持 `-100...` 数字 ID |
 | **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮 |
+| **结果关键词** | 只做子串匹配 | 支持 `re:` 前缀写正则，应对每次随机生成的吉祥话回执 |
 
 合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
 
@@ -267,6 +268,15 @@ bot_success_keywords = ["签到成功"]
 [checkiner.micu]
 bot_challenge_keywords = ["请回答", "算一下"]
 ```
+
+**回执文案每次都随机**时，关键词可以写正则（以 `re:` 开头，其余仍按子串匹配）：
+
+```toml
+[checkiner.'templ_a<ashUniversal_Bot>']
+bot_success_keywords = ["re:奖励|红包|到账|恭喜"]
+```
+
+这条规则对 `bot_success_keywords` / `bot_fail_keywords` / `bot_checked_keywords` / `bot_challenge_keywords` / `bot_account_fail_keywords` / `bot_text_ignore` 都生效。写错的正则会被当作不匹配跳过，不会让签到崩掉。
 
 若机器人把「签到成功」放在按钮回调的 toast 里、题目在随后一条消息，关掉 toast 解析即可：
 
