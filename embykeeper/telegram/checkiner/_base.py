@@ -140,8 +140,31 @@ CHALLENGE_INSTRUCTION_PATTERN = re.compile(
 # 补全诗句类题目: 诗句被挖空, 需要按顺序从按钮里选字填进去.
 POEM_FILL_PATTERN = re.compile(r"(补全|填空|填写).{0,4}诗|诗.{0,4}(填空|补全)")
 
+# 诗句里被挖空的占位符. 连在一起的占位符要按字逐个算: 机器人会要求
+# "至少要按顺序点击两个答案按钮", 只填一个字会被判 "空位没有补全".
+# 下划线只认两个以上, 避免把 @some_bot 这类用户名里的单个下划线算成空位.
+POEM_BLANK_PATTERN = re.compile(r"[░▒▓█▁▂▃▄▅▆▇■□▢▣◻◼◯○〇﹏＿]+|_{2,}")
+
+# 机器人抱怨 "作答不完整": 空位没补全 / 至少要按顺序点两个按钮.
+# 这时题目还在, 带着它的原话重新作答一次往往就成了, 不该当成异常返回信息.
+CHALLENGE_INCOMPLETE_PATTERN = re.compile(
+    r"(至少|需要|必须|还要|请).{0,8}(点击|选择|填入|补全).{0,8}[两二三四五六七八九1-9]\s*[个次下]"
+    r"|(空位|空缺|空格|空档).{0,10}(没有|未|没).{0,6}(补全|填满|填完|补齐)"
+)
+
 # 智能回答给出的点击指令, 一条回答里可以出现多个 (如 "依次点击补全诗句" 要点两下).
 CLICK_PATTERN = re.compile(r"\[CLICK\]\^(.+?)\^")
+
+
+def count_poem_blanks(text: str) -> int:
+    """数诗句里被挖空的位置数, 用来要求模型输出同样数量的点击.
+
+    机器人把空位画成一串占位符, 模型看到 "兵░是" 往往只当缺一个字;
+    而这类题目常常是连续挖空, 必须逐字补满才算完成.
+    """
+    if not text:
+        return 0
+    return sum(len(m.group(0)) for m in POEM_BLANK_PATTERN.finditer(text))
 
 
 class MessageType(Flag):
@@ -249,6 +272,9 @@ class BotCheckin(BaseBotCheckin):
     bot_challenge_keywords: Union[str, List[str]] = []  # 验证问题关键词, 命中后交给智能回答, 置空使用内置关键词表
     _challenge_pending = False  # 验证题正在解答中, 期间忽略含成功关键词的提示消息
     _pending_success_text = None  # 解答验证题期间收到的成功消息, 作答结束后补处理
+    _challenge_message = None  # 正在作答的验证题消息, 机器人抱怨"没补全"时据此重答
+    _challenge_clicked = None  # 上一次作答点过的按钮, 重答时告诉模型避免重复
+    _challenge_retries = 0  # 因"作答不完整"重答的次数
     bot_checked_keywords: Union[str, List[str]] = []  # 今日已签到时检测的关键词, 置空使用内置关键词表
     bot_account_fail_keywords: Union[str, List[str]] = []  # 账户错误将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = []  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
@@ -708,6 +734,35 @@ class BotCheckin(BaseBotCheckin):
             return True
         return bool(CHALLENGE_INSTRUCTION_PATTERN.search(normalized))
 
+    def is_challenge_incomplete(self, text: str) -> bool:
+        """机器人是否在抱怨 "作答不完整" (空位没补全 / 至少要按顺序点两个按钮).
+
+        这类提示既不是签到结果, 也不是新题目, 更不是异常返回: 题目还挂在原来那条
+        消息上, 只要补点几个按钮就能过. 若不单独识别, 它会落到 on_unexpected_text,
+        那里一旦让模型点了按钮就会以 "避免风险" 为由中止整个签到.
+        """
+        if not text or self._challenge_message is None:
+            return False
+        return bool(CHALLENGE_INCOMPLETE_PATTERN.search(unicodedata.normalize("NFKC", text)))
+
+    async def on_challenge_incomplete(self, message: Message, text: str) -> bool:
+        """带着机器人的抱怨重新作答, 返回是否已接管这条消息."""
+        if self._challenge_message is None:
+            return False
+        if self._challenge_pending:
+            # 上一次作答还在进行, 这条抱怨多半就是它引起的, 等它自己结束.
+            self.log.debug(f"作答进行中, 暂不重复作答: {truncate_str(text, 40)}")
+            return True
+        if self._challenge_retries >= 2:
+            self.log.warning(f"多次作答仍被判不完整, 不再重答, 等待超时后重试.")
+            return True
+        self._challenge_retries += 1
+        self.log.info(
+            f"作答不完整, 带着机器人的提示重新作答 ({self._challenge_retries}/2): {truncate_str(text, 40)}"
+        )
+        await self.gpt_handle_message(self._challenge_message, unexpected=False, feedback=text)
+        return True
+
     async def on_text(self, message: Message, text: str):
         """接收非验证码消息时, 检测关键词并确认签到成功或失败, 发送用户提示."""
         if not text:
@@ -728,6 +783,9 @@ class BotCheckin(BaseBotCheckin):
             # 这类消息往往也含 "签到成功" / "请完成" 等字样, 若按成功处理就会漏答并误报成功.
             self.log.info("检测到验证问题, 正在尝试智能回答.")
             self._challenge_pending = True
+            self._challenge_message = message
+            self._challenge_clicked = None
+            self._challenge_retries = 0
             try:
                 await self.gpt_handle_message(message, unexpected=False)
             finally:
@@ -738,6 +796,9 @@ class BotCheckin(BaseBotCheckin):
             if pending:
                 self.log.info(f"处理作答期间收到的成功消息: {truncate_str(pending, 40)}")
                 await self.on_text(None, pending)
+        elif self.is_challenge_incomplete(text) and await self.on_challenge_incomplete(message, text):
+            # 机器人提示 "空位没补全 / 至少要按顺序点两个按钮", 题目还在, 重答一次.
+            return
         elif keyword_match(
             text, to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]
         ):
@@ -794,7 +855,7 @@ class BotCheckin(BaseBotCheckin):
     async def on_unexpected_text(self, message: Message):
         return await self.gpt_handle_message(message, unexpected=True)
 
-    async def gpt_handle_message(self, message: Message, unexpected: bool = True):
+    async def gpt_handle_message(self, message: Message, unexpected: bool = True, feedback: str = None):
         content = message.text or message.caption
         if content:
             spec = content.replace("\n", " ")
@@ -816,6 +877,7 @@ class BotCheckin(BaseBotCheckin):
                 f"{content}\n\n"
             )
             poem_fill = bool(POEM_FILL_PATTERN.search(content))
+            blank_count = count_poem_blanks(content) if poem_fill else 0
             if poem_fill:
                 # 补全诗句是知识题, 泛泛地问模型容易答成 "这是状态信息".
                 # 明确告诉它挖空位置与作答顺序, 命中率会高很多.
@@ -824,6 +886,31 @@ class BotCheckin(BaseBotCheckin):
                     "需要按挖空出现的先后顺序, 从按钮中选出对应的字填回去。\n"
                     "请先在心里还原完整原句, 再按顺序输出每个挖空对应的按钮。\n"
                 )
+                if blank_count >= 2:
+                    prompt += (
+                        f"诗句里一共挖空了 {blank_count} 个字, 必须按顺序输出 {blank_count} 个 [CLICK], "
+                        "一个都不能少; 相邻的占位符算作多个空位, 要分别输出。\n"
+                    )
+                else:
+                    # 只看到一个占位符也不能就答一个字: 占位符可能比它代表的字数窄,
+                    # 原句此处常是一个词 (如 "兵者"), 少答一个字会被判 "空位没有补全".
+                    prompt += (
+                        "注意: 占位符的宽度不代表空缺的字数, 一处空缺常常要补两个字 "
+                        "(例如原句是「兵者」而只画了一个占位符)。请还原整句后按实际缺的字逐字输出。\n"
+                    )
+            if feedback:
+                # 机器人已经明确说 "没补全 / 至少要按顺序点两个", 这是最可靠的信息,
+                # 比让模型重看一遍题面有效得多.
+                prompt += (
+                    "上一次的作答被机器人拒绝了, 它的原话是:\n"
+                    f"{feedback}\n"
+                    "请据此修正, 这次必须把空位全部补满, 按顺序输出。\n"
+                )
+                if self._challenge_clicked:
+                    prompt += (
+                        f"上次已经点击过: {', '.join(self._challenge_clicked)}。"
+                        "这些字如果已经填对就不要再点, 只补缺的部分。\n"
+                    )
             if buttons:
                 prompt += (
                     f"你可选: {', '.join(button_specs)} 作为回答.\n"
@@ -891,12 +978,19 @@ class BotCheckin(BaseBotCheckin):
                                 await message.click(b)
                             except (TimeoutError, MessageIdInvalid):
                                 pass
+                            except Exception as e:
+                                # 机器人可能已经重建了键盘, 旧按钮的 callback_data 失效.
+                                # 这里不能让异常冒出去, 否则整次签到会被判失败.
+                                self.log.debug(f'点击按钮 "{b}" 失败: {e}')
                             if len(matched_buttons) > 1:
                                 self.log.info(
                                     f'智能回答点击了按钮 "{b}" ({index + 1}/{len(matched_buttons)}).'
                                 )
                         if len(matched_buttons) == 1:
                             self.log.info(f'智能回答点击了按钮 "{matched_buttons[0]}".')
+                        if not unexpected:
+                            # 记下这次点了什么, 机器人若抱怨 "没补全", 重答时告诉模型别重复点.
+                            self._challenge_clicked = list(matched_buttons)
                         if unexpected:
                             self.log.warning(f"智能回答已点击按钮, 为了避免风险签到器将停止.")
                             await self.fail()
@@ -934,6 +1028,10 @@ class BotCheckin(BaseBotCheckin):
     async def retry(self):
         """执行重试, 重新发送签到指令."""
         self.current_retries += 1
+        # 新一轮签到会重新发题, 上一轮记下的题目消息不再有效.
+        self._challenge_message = None
+        self._challenge_clicked = None
+        self._challenge_retries = 0
         if self.current_retries <= self.valid_retries:
             await asyncio.sleep(self.bot_retry_wait)
             await self.send_checkin(retry=True)
@@ -960,6 +1058,8 @@ class BotCheckin(BaseBotCheckin):
         self.ctx.status = status
         self.ctx.status_info = message
         self.finished.set()
+        # 流程结束后不再对旧题目重答, 避免迟到的提示把已结束的签到又拉起来.
+        self._challenge_message = None
         return self
 
     async def wait_until(self, pattern: str = ".", timeout: float = None):

@@ -40,11 +40,13 @@ class FakeMessage:
 
 class FakeLink:
     answer = ""
+    prompts = []
 
     def __init__(self, client):
         self.client = client
 
     async def gpt(self, prompt):
+        FakeLink.prompts.append(prompt)
         return FakeLink.answer, "fake"
 
 
@@ -60,6 +62,7 @@ class FakeAsyncIO:
 def patch_environment(monkeypatch):
     monkeypatch.setattr(_base, "Link", FakeLink)
     monkeypatch.setattr(_base, "asyncio", FakeAsyncIO)
+    FakeLink.prompts = []
 
 
 def make_checkin():
@@ -146,3 +149,108 @@ def test_click_pattern_extracts_all_targets():
     assert _base.CLICK_PATTERN.findall("[CLICK]^丛^[CLICK]^在^") == ["丛", "在"]
     assert _base.CLICK_PATTERN.findall("[CLICK]^丛^") == ["丛"]
     assert _base.CLICK_PATTERN.findall("[NO_RESP]") == []
+
+
+# ------------------------------------------------- 空位计数与 "没补全" 重答
+
+# 只有一个占位符, 但机器人实际要求补两个字 (用户线上遇到的原始题面).
+POEM_SINGLE = """🌸 防机器签到验证 🌸
+
+请继续点击补全诗句：
+
+乃者兵░是凶器，圣人不得已而用之..."""
+
+BUTTONS_SINGLE = [["天", "孤", "共", "齐"], ["者", "落", "知", "飞"]]
+
+COMPLAINT = "空位连在一起了没有补全，至少要按顺序点击两个答案按钮"
+
+
+def test_count_poem_blanks():
+    assert _base.count_poem_blanks("忆对中秋丹桂＿。 花＿杯中。") == 2
+    assert _base.count_poem_blanks("乃者兵░是凶器") == 1
+    assert _base.count_poem_blanks("乃者兵░░是凶器") == 2
+    # 单个下划线属于用户名 (如 @some_bot), 不能算成空位
+    assert _base.count_poem_blanks("@some_bot 签到") == 0
+    assert _base.count_poem_blanks("") == 0
+
+
+def test_prompt_requires_exact_number_of_clicks():
+    """多个空位时, 要明确告诉模型必须输出同样数量的 [CLICK]."""
+    FakeLink.answer = "[CLICK]^丛^[CLICK]^在^"
+    inst = make_checkin()
+    asyncio.run(inst.gpt_handle_message(FakeMessage(POEM, BUTTONS), unexpected=False))
+    assert "一共挖空了 2 个字" in FakeLink.prompts[0]
+
+
+def test_single_placeholder_still_warns_about_multiple_chars():
+    """只看到一个占位符也不能就答一个字: 占位符宽度不代表字数."""
+    FakeLink.answer = "[CLICK]^者^"
+    inst = make_checkin()
+    asyncio.run(inst.gpt_handle_message(FakeMessage(POEM_SINGLE, BUTTONS_SINGLE), unexpected=False))
+    assert "占位符的宽度不代表空缺的字数" in FakeLink.prompts[0]
+
+
+def test_is_challenge_incomplete_requires_a_known_quiz():
+    inst = make_checkin()
+    # 没记下题目时不能接管, 否则会把正常消息吞掉
+    assert inst.is_challenge_incomplete(COMPLAINT) is False
+    inst._challenge_message = object()
+    assert inst.is_challenge_incomplete(COMPLAINT) is True
+    assert inst.is_challenge_incomplete("🎉 签到成功") is False
+
+
+def test_incomplete_complaint_triggers_retry():
+    """机器人说 "没补全" 时, 带着它的原话和上次点过的字重新作答."""
+    FakeLink.answer = "[CLICK]^者^[CLICK]^落^"
+    inst = make_checkin()
+    quiz = FakeMessage(POEM_SINGLE, BUTTONS_SINGLE)
+    inst._challenge_message = quiz
+    inst._challenge_clicked = ["者"]
+
+    assert asyncio.run(inst.on_challenge_incomplete(None, COMPLAINT)) is True
+    assert quiz.clicked == ["者", "落"]
+    assert inst._challenge_retries == 1
+    prompt = FakeLink.prompts[-1]
+    assert COMPLAINT in prompt
+    assert "上次已经点击过: 者" in prompt
+
+
+def test_retry_is_capped_at_two():
+    FakeLink.answer = "[CLICK]^者^"
+    inst = make_checkin()
+    inst._challenge_message = FakeMessage(POEM_SINGLE, BUTTONS_SINGLE)
+    for _ in range(5):
+        assert asyncio.run(inst.on_challenge_incomplete(None, COMPLAINT)) is True
+    assert inst._challenge_retries == 2
+    # 超限后不再调用模型, 只是把消息吞掉等超时重试
+    assert len(FakeLink.prompts) == 2
+
+
+def test_challenge_branch_records_quiz_message():
+    """出题时要把题面消息和点过的字记下来, 否则机器人抱怨时无从重答."""
+    FakeLink.answer = "[CLICK]^者^"
+    inst = make_checkin()
+    quiz = FakeMessage(POEM_SINGLE, BUTTONS_SINGLE)
+    asyncio.run(inst.on_text(quiz, POEM_SINGLE))
+    assert inst._challenge_message is quiz
+    assert inst._challenge_clicked == ["者"]
+    assert quiz.clicked == ["者"]
+    assert inst.failed == []
+
+
+def test_on_text_routes_complaint_to_retry():
+    """on_text 必须把 "没补全" 的抱怨接到重答分支, 而不是当成异常返回信息."""
+    FakeLink.answer = "[CLICK]^者^[CLICK]^落^"
+    inst = make_checkin()
+    quiz = FakeMessage(POEM_SINGLE, BUTTONS_SINGLE)
+    inst._challenge_message = quiz
+
+    asyncio.run(inst.on_text(None, COMPLAINT))
+    assert quiz.clicked == ["者", "落"]
+    assert inst.failed == []
+
+
+def test_complaint_without_quiz_is_not_swallowed():
+    """没有正在作答的题目时, 这句抱怨不能被悄悄吃掉, 仍走通用处理."""
+    inst = make_checkin()
+    assert asyncio.run(inst.on_challenge_incomplete(None, COMPLAINT)) is False
