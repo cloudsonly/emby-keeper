@@ -149,7 +149,7 @@ class TemplateACheckin(BotCheckin):
             except MessageIdInvalid:
                 return True
             if self._path_index >= len(path):
-                await self.on_button_answer(answer)
+                await self.on_button_answer(answer, from_path=True)
             return True
 
         keyboard = getattr(markup, "keyboard", None)
@@ -253,7 +253,15 @@ class TemplateACheckin(BotCheckin):
             self.log.debug(f"点击签到按钮 [{inline[row_index][col_index].text}].")
             await asyncio.sleep(random.uniform(0.5, 1.5))
             try:
-                answer: BotCallbackAnswer = await message.click(row_index, col_index)
+                # 注意参数顺序: pyrogram 的 click(x, y) 里 x 是列、y 是行
+                # (内部取 keyboard[y][x]), 与 (行, 列) 的直觉相反. 传反了会报
+                # "The button at position (行, 列) doesn't exist".
+                answer: BotCallbackAnswer = await message.click(col_index, row_index)
+            except ValueError:
+                # 消息在这期间被编辑 / 机器人改了布局, 位置失效.
+                self.log.warning("签到失败: 签到按钮位置已失效, 面板可能被机器人改过.")
+                self._log_panel_buttons(getattr(message.reply_markup, "inline_keyboard", None) or [])
+                return await self.fail()
             except TimeoutError:
                 self.log.debug(f"点击签到按钮无响应, 可能按钮未正确处理点击回复. 一般来说不影响签到.")
             except MessageIdInvalid:
@@ -268,12 +276,24 @@ class TemplateACheckin(BotCheckin):
 
         await super().message_handler(client, message)
 
-    async def on_button_answer(self, answer: BotCallbackAnswer):
+    def _is_meaningful_answer(self, text: str) -> bool:
+        """回调提示是否值得处理.
+
+        进菜单这类导航按钮的提示往往是一句 "✅ 用户界面", 既不是结果也不是题目.
+        若原样交给 on_text, 会落到"无法识别 → 智能回答"的兜底分支, 而该分支一旦
+        让模型点了按钮就会以"避免风险"为由中止整个签到, 因此这里直接过滤.
+        """
+        return self.is_challenge_text(text) or self.is_result_text(text)
+
+    async def on_button_answer(self, answer: BotCallbackAnswer, from_path: bool = False):
         if self.use_button_answer:
             if not isinstance(answer, BotCallbackAnswer):
                 self.log.warning(f"签到失败: 签到按钮指向 URL, 不受支持.")
                 return await self.fail()
             if answer.message and not any(ignore in answer.message for ignore in self.bot_text_ignore_answer):
+                if from_path and not self._is_meaningful_answer(answer.message):
+                    self.log.debug(f"忽略导航按钮的提示: {answer.message}")
+                    return
                 await self.on_text(Message(id=0, text=answer.message), answer.message)
 
 

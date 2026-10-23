@@ -8,17 +8,18 @@ import asyncio
 
 import pytest
 from loguru import logger
+from pyrogram.raw.types.messages import BotCallbackAnswer
 
 from embykeeper.telegram.checkiner import _templ_a
 from embykeeper.telegram.checkiner._base import BotCheckin
 from embykeeper.telegram.checkiner._templ_a import TemplateACheckin, TemplateACheckinConfig
 
-# 截图里的真实面板, 2 列网格, "今朝已至" 是第 8 个按钮.
+# 截图里的真实面板, 2 列网格, 签到按钮是第 8 个 (第 4 行第 2 列).
 PANEL = [
     ["兑换商店", "删除账号"],
     ["显示/隐藏", "重置密码"],
     ["我的收藏", "我的设备"],
-    ["唤醒口令", "今朝已至"],
+    ["唤醒口令", "到此一游"],
     ["渔务托管", "德州托管"],
     ["徽章系统", "补充计划"],
     ["问币银行"],
@@ -46,8 +47,29 @@ class FakeMessage:
         self.clicked = []
 
     async def click(self, x, y=None):
+        # 与 pyrogram 一致: x 是列, y 是行, 内部取 keyboard[y][x].
+        # 故意照抄这个反直觉的顺序, 传反参数时测试才会像线上一样报错.
+        keyboard = self.reply_markup.inline_keyboard
+        try:
+            if y is None:
+                button = [b for row in keyboard for b in row][x]
+            else:
+                button = keyboard[y][x]
+        except IndexError:
+            raise ValueError(f"The button at position ({x}, {y}) doesn't exist")
         self.clicked.append((x, y))
-        return "callback-answer"
+        return button.text
+
+
+class BrokenClickMessage(FakeMessage):
+    """模拟面板在定位之后被机器人改版: 位置算得出, 点下去却不存在."""
+
+    async def click(self, x, y=None):
+        raise ValueError(f"The button at position ({x}, {y}) doesn't exist")
+
+
+def answer(text):
+    return BotCallbackAnswer(cache_time=0, message=text)
 
 
 class FakeAsyncIO:
@@ -174,8 +196,9 @@ def test_handler_clicks_by_position(fast_sleep):
     inst = make_checkin(bot_checkin_button_index=8)
     message = FakeMessage(PANEL)
     run(inst.message_handler(None, message))
-    assert message.clicked == [(3, 1)]
-    assert inst.answers == ["callback-answer"]
+    # pyrogram 的参数是 (列, 行): 第 4 行第 2 列 -> click(1, 3)
+    assert message.clicked == [(1, 3)]
+    assert inst.answers == ["到此一游"]
     assert inst.failed == []
 
 
@@ -184,6 +207,14 @@ def test_handler_fails_when_unmatched(fast_sleep):
     message = FakeMessage(PANEL)
     run(inst.message_handler(None, message))
     assert message.clicked == []
+    assert inst.failed == [True]
+
+
+def test_stale_position_fails_gracefully(fast_sleep):
+    """定位算得出但点击时按钮已不存在, 应记失败而不是把整个签到器炸掉."""
+    inst = make_checkin(bot_checkin_button_index=8)
+    message = BrokenClickMessage(PANEL)
+    run(inst.message_handler(None, message))
     assert inst.failed == [True]
 
 
@@ -197,7 +228,7 @@ def test_log_dumps_numbered_buttons():
     finally:
         logger.remove(handler_id)
     text = "".join(records)
-    assert "8.今朝已至" in text
+    assert "8.到此一游" in text
     assert "1.兑换商店" in text
 
 
@@ -232,3 +263,58 @@ def test_config_fields_are_typed():
     assert cfg.bot_checkin_button_index == 8
     cfg = TemplateACheckinConfig.model_validate({"bot_checkin_button_index": [4, 2]})
     assert cfg.bot_checkin_button_index == [4, 2]
+
+
+# ------------------------------------------------- 导航按钮的回调提示过滤
+
+
+def make_answer_handler(**kw):
+    """构造只测 on_button_answer 的实例."""
+    inst = make_checkin(**kw)
+    inst.use_button_answer = True
+    inst.bot_text_ignore_answer = ["Done"]
+    inst.texts = []
+
+    async def on_text(message, text=None):
+        inst.texts.append(text if text is not None else message.text)
+
+    inst.on_text = on_text
+    # 真实方法, 不是测试里替换过的桩
+    inst.on_button_answer = TemplateACheckin.on_button_answer.__get__(inst, TemplateACheckin)
+    inst.is_challenge_text = lambda text: "请回答" in text
+    inst.is_result_text = lambda text: any(k in text for k in ("成功", "失败", "已签到", "只能", "签过"))
+    return inst
+
+
+def test_navigation_answer_is_not_sent_to_gpt():
+    """点「用户功能」得到的 "✅ 用户界面" 既不是结果也不是题目, 不能交给智能回答."""
+    inst = make_answer_handler()
+    run(inst.on_button_answer(answer("✅ 用户界面"), from_path=True))
+    assert inst.texts == []
+
+
+def test_navigation_answer_with_result_is_kept():
+    """路径最后一级本身就是签到按钮时, 提示里的成功信息仍要处理."""
+    inst = make_answer_handler()
+    run(inst.on_button_answer(answer("签到成功, 获得 5 币"), from_path=True))
+    assert inst.texts == ["签到成功, 获得 5 币"]
+
+
+def test_navigation_answer_with_challenge_is_kept():
+    inst = make_answer_handler()
+    run(inst.on_button_answer(answer("请回答: 3+4=?"), from_path=True))
+    assert inst.texts == ["请回答: 3+4=?"]
+
+
+def test_panel_click_answer_is_always_processed():
+    """真正的签到点击不受过滤影响, 哪怕提示看起来像导航语."""
+    inst = make_answer_handler()
+    run(inst.on_button_answer(answer("✅ 用户界面"), from_path=False))
+    assert inst.texts == ["✅ 用户界面"]
+
+
+def test_ignored_answer_still_honours_ignore_list():
+    inst = make_answer_handler()
+    inst.bot_text_ignore_answer = ["用户界面"]
+    run(inst.on_button_answer(answer("✅ 用户界面"), from_path=False))
+    assert inst.texts == []

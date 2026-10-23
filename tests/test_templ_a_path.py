@@ -67,8 +67,8 @@ def make_checkin(path):
     inst.log = logger.bind(name="test")
     inst.answers = []
 
-    async def on_button_answer(answer):
-        inst.answers.append(answer)
+    async def on_button_answer(answer, from_path=False):
+        inst.answers.append((answer, from_path))
 
     inst.on_button_answer = on_button_answer
     return inst
@@ -97,8 +97,8 @@ def test_path_advances_step_by_step(fast_sleep):
     assert asyncio_run(inst._advance_button_path(second)) is True
     assert clicked == ["用户功能", "数据存档"]
     assert inst._path_index == 2
-    # 最后一级点击后交给 on_button_answer 解析
-    assert inst.answers == ["callback-answer"]
+    # 最后一级点击后交给 on_button_answer 解析, 并标记为路径点击
+    assert inst.answers == [("callback-answer", True)]
 
 
 def test_path_returns_false_when_button_absent(fast_sleep):
