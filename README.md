@@ -124,7 +124,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **Emby 保活** | 标准 API 假设 | 分块限流、错误码 520–525、`PositionTicks` 夹 int4、租约恢复、base path 探测、CDN 取流、进度上报降级 |
 | **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
 | **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
-| **群组签到** | 仅少数站点内置，模板里写 `chat_name` 会被静默忽略 | `templ_a` / `templ_b` 支持 `chat_name`（保留机器人过滤），模板 B 另有 `is_chat` 与私有群数字 ID |
+| **群组签到** | `templ_b` 的 `is_chat` / `wait_response` 已支持「群里发关键字」；但模板里写 `chat_name` 会被静默忽略，模板 A 无法在群里用，私有群数字 ID 也匹配不到 | 新增 `chat_name`（群里跟机器人对话，保留机器人过滤）、模板 A 群签到、站点名支持 `-100...` 数字 ID |
 
 合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
 
@@ -189,39 +189,40 @@ bot_checkin_path = ["用户功能", "数据存档"]
 
 **群组签到**（有些站点只在群里响应，私聊机器人没反应）：
 
-| 场景 | 模板 | 关键配置 |
-|---|---|---|
-| 群里 @ 机器人发命令，等它回「签到成功」 | `templ_b` | `chat_name` |
-| 群里点按钮 / 走面板签到 | `templ_a` | `chat_name` |
-| 群里发个关键字就算签到 | `templ_b` | `is_chat` |
-| 群里发个关键字，发完即结束（不等回复） | `templ_b` | `is_chat` + `wait_response = false` |
+| 场景 | 模板 | 关键配置 | 来源 |
+|---|---|---|---|
+| 群里发个关键字就算签到 | `templ_b` | `is_chat` | **上游原生** |
+| 群里发个关键字，发完即结束（不等回复） | `templ_b` | `is_chat` + `wait_response = false` | **上游原生** |
+| 群里 @ 机器人发命令，等它回「签到成功」 | `templ_b` | `chat_name` | 本 fork |
+| 群里点按钮 / 走面板签到 | `templ_a` | `chat_name` | 本 fork |
+| 私有群（无 `@username`） | 任意 | 站点名写数字 ID | 本 fork |
+
+最常见的「群里发个关键字，发完即结束」是上游原生能力，**不需要本 fork 的任何改动**：
 
 ```toml
-# 1) 在群里跟机器人签到: 保留机器人过滤, 群友的闲聊不会被当成签到结果
+[checkiner.'templ_b<some_emby_group>']
+name = "某某群冒泡"
+is_chat = true           # 尖括号里写群, 不是机器人
+bot_checkin_cmd = "签到"
+wait_response = false    # 发完直接记为成功并结束
+bot_use_captcha = false  # 群里图片多, 关掉 OCR
+```
+
+`bot_checkin_cmd` 给列表时每次随机挑一个：`["签到", "打卡", "冒泡"]`。
+
+本 fork 补的是另一条路径——**在群里跟机器人对话**（`chat_name`），它保留 `filters.user(机器人)`，只处理机器人的回复，群友的闲聊不会被当成签到结果；模板 A 也因此能在群里点按钮签到：
+
+```toml
 [checkiner.'templ_b<SomeEmbyBot>']
 name = "某某群签到"
 chat_name = "some_emby_group"             # 群的 @username, 或私有群数字 ID
 bot_checkin_cmd = "/checkin@SomeEmbyBot"  # 群里发命令必须带 @机器人名
 bot_success_keywords = ["签到成功"]
-
-# 2) 群里发关键字就算签到: 尖括号里写群, 不再当机器人
-[checkiner.'templ_b<some_emby_group>']
-name = "某某群每日打卡"
-is_chat = true
-bot_checkin_cmd = "签到"
-wait_response = false    # 不等回复, 发完直接结束
-bot_use_captcha = false
-
-# 3) 群里点按钮签到
-[checkiner.'templ_a<SomeEmbyBot>']
-name = "某某群按钮签到"
-chat_name = "some_emby_group"
-bot_checkin_cmd = "/start@SomeEmbyBot"
 ```
 
-`chat_name` 与 `is_chat` 的区别：前者**保留** `filters.user(机器人)`，只处理机器人的回复；后者把尖括号里的会话直接当群，没有机器人可过滤，群里任何人说「成功」都可能被判签到成功，所以 `is_chat` 模式下务必用 `bot_success_keywords` 收窄。
+`chat_name` 与 `is_chat` 的区别：前者**保留**机器人过滤，只认机器人的回复；后者把尖括号里的会话直接当群，没有机器人可过滤，群里任何人说「成功」都可能被判签到成功，所以 `is_chat` 模式下务必用 `bot_success_keywords` 收窄。
 
-私有群 / 频道只能用数字 ID，站点名里也支持：`[checkiner.'templ_b<-1001234567890>']`（自动转成 int，写字符串会被 pyrogram 当用户名去解析）。若 `chat_name` 与站点名里的会话同名，过滤器会变成「群组发的消息 + 发信人是群组本身」，永远匹配不到，程序会打一条警告提醒改用 `is_chat`。
+私有群 / 频道只能用数字 ID，站点名里也支持：`[checkiner.'templ_b<-1001234567890>']`（自动转成 int，写字符串会被 pyrogram 当用户名去解析）。上游正则 `templ_(\w+)<@?(\w+)>` 匹配不到带 `-` 的 ID，这是本 fork 放宽的。若 `chat_name` 与站点名里的会话同名，过滤器会变成「群组发的消息 + 发信人是群组本身」，永远匹配不到，程序会打一条警告提醒改用 `is_chat`。
 
 已有内置群签到器可直接启用（都需显式加入白名单）：`pandatv_group`、`akile_group`、`bytevirt_group`、`epub_group`、`epub_group_chat`、`feiyuemusic_group_old`、`marmot_group_old`、`pornfans_group`、`pornfans_game_group`。其中 `pandatv_group` 属于默认启用范围，其余在 `__ignore__` 里。
 
