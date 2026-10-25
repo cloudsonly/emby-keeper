@@ -11,7 +11,10 @@ from . import AnswerBotCheckin
 class TerminusCheckin(AnswerBotCheckin):
     name = "终点站"
     bot_username = "EmbyPublicBot"
-    bot_checkin_cmd = ["/cancel", "/checkin"]
+    # 只发 /checkin. 上游是 ["/cancel", "/checkin"], 会先发一条 /cancel ——
+    # 机器人回 "没有活跃的会话，无需清理。" 纯属浪费一次往返, 还会把首条响应
+    # 占掉, 真正的验证图片晚到一步. 实测不先 /cancel 也能正常签到.
+    bot_checkin_cmd = "/checkin"
     bot_text_ignore = ["会话已取消", "没有活跃的会话"]
     bot_checked_keywords = ["今天已签到"]
     additional_auth = ["visual"]

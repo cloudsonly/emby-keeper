@@ -155,6 +155,14 @@ CHALLENGE_INCOMPLETE_PATTERN = re.compile(
 # 智能回答给出的点击指令, 一条回答里可以出现多个 (如 "依次点击补全诗句" 要点两下).
 CLICK_PATTERN = re.compile(r"\[CLICK\]\^(.+?)\^")
 
+# 签到进行中的中间状态: "签到中..." / "正在签到, 请稍候".
+# 这类消息既不是结果也不是题目, 交给智能回答只会白花一次调用 —— 模型基本答不出来,
+# 连续 3 次拿不到答案就会以 "避免风险签到器将停止" 直接判失败, 而真正的成功消息
+# 往往几秒后才到. 典型: @laoyou_bot / @lgembybot 先回 "签到中...", 再回 "🎉 签到成功!".
+IN_PROGRESS_PATTERN = re.compile(
+    r"签到中|正在签到|签到处理中|正在处理|处理中|排队中|正在查询|正在统计|请稍候|请稍等|请耐心等待"
+)
+
 
 def count_poem_blanks(text: str) -> int:
     """数诗句里被挖空的位置数, 用来要求模型输出同样数量的点击.
@@ -280,6 +288,7 @@ class BotCheckin(BaseBotCheckin):
     bot_too_many_tries_fail_keywords: Union[str, List[str]] = []  # 过多尝试将退出时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_fail_keywords: Union[str, List[str]] = []  # 签到错误将重试时检测的关键词 (暂不支持regex), 置空使用内置关键词表
     bot_captcha_error_keywords: Union[str, List[str]] = []  # 验证码错误时检测的关键词, 命中后交由 on_captcha_error 处理, 置空不启用
+    bot_in_progress_keywords: Union[str, List[str]] = []  # 签到进行中的中间状态关键词, 命中后继续等待结果, 置空使用内置模式
     chat_name: str = None  # 在群聊中向机器人签到
     additional_auth: List[str] = []  # 额外认证要求
     max_retries = None  # 验证码错误或网络错误时最高重试次数 (默认无限)
@@ -849,8 +858,25 @@ class BotCheckin(BaseBotCheckin):
                     self._log_success_basis(text)
                 await self.after_success()
                 await self.finish(RunStatus.SUCCESS, "签到成功")
+        elif self.is_in_progress_text(text):
+            # "签到中..." / "正在签到, 请稍候": 继续等真正的结果, 不要交给智能回答.
+            self.log.debug(f"签到进行中, 继续等待结果: {truncate_str(text, 40)}")
         else:
             await self.on_unexpected_text(message)
+
+    def is_in_progress_text(self, text: str) -> bool:
+        """判断是否为 "签到中..." 这类中间状态.
+
+        它既不是结果也不是题目: 交给智能回答只会白花一次调用, 而模型基本答不出来,
+        连续 3 次拿不到答案就会以 "避免风险签到器将停止" 判失败, 可真正的成功消息
+        往往几秒后才到. 遇到这种消息只记一笔日志, 继续等结果即可.
+        """
+        if not text:
+            return False
+        keywords = to_iterable(self.bot_in_progress_keywords)
+        if keywords:
+            return keyword_match(text, keywords)
+        return bool(IN_PROGRESS_PATTERN.search(unicodedata.normalize("NFKC", text)))
 
     async def on_unexpected_text(self, message: Message):
         return await self.gpt_handle_message(message, unexpected=True)
