@@ -123,7 +123,7 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **验证码 / 考核问答** | 云端打码与 GPT | 本地 OpenAI 兼容接口（OpenAI / DeepSeek / 智谱 / 本地模型） |
 | **Emby 保活** | 标准 API 假设 | 分块限流、错误码 520–525、`PositionTicks` 夹 int4、租约恢复、base path 探测、CDN 取流、进度上报降级 |
 | **TLS 校验** | 强制校验 | 全局 `emby.verify` + 账号级覆盖，兼容自签证书 |
-| **网页签到** | 无 | 移植 `結束バンド`（plusemby），含 Turnstile 求解 |
+| **网页签到** | 无 | 移植 `plusemby`，含 Turnstile 求解 |
 | **群组签到** | `templ_b` 的 `is_chat` / `wait_response` 已支持「群里发关键字」；但模板里写 `chat_name` 会被静默忽略，模板 A 无法在群里用，私有群数字 ID 也匹配不到 | 新增 `chat_name`（群里跟机器人对话，保留机器人过滤）、模板 A 群签到、站点名支持 `-100...` 数字 ID |
 | **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮；`bot_checkin_button_repeat` + `bot_checkin_button_interval` 支持按间隔连点直到成功 |
 | **结果关键词** | 只做子串匹配 | 支持 `re:` 前缀写正则，应对每次随机生成的吉祥话回执 |
@@ -170,7 +170,7 @@ docker run -d --name embykeeper -v $(pwd)/app:/app --net=host \
 checkiner = ["all", "+plusemby"]
 ```
 
-**多个 plusemby（結束バンド）站点**：一个站点名只对应一份配置（`get_site_config` 返回单个 dict，写成 `[[checkiner.plusemby]]` 数组会报 `'list' object has no attribute 'get'`），所以多站点要按 Telegram 账号隔离：
+**多个 plusemby 站点**：一个站点名只对应一份配置（`get_site_config` 返回单个 dict，写成 `[[checkiner.plusemby]]` 数组会报 `'list' object has no attribute 'get'`），所以多站点要按 Telegram 账号隔离：
 
 ```toml
 [[telegram.account]]
@@ -197,11 +197,11 @@ bot_checkin_path = ["用户功能", "数据存档"]
 
 `bot_checkin_path` 会按顺序点击按钮（内联按钮或底部回复键盘都支持），最后一级视为签到按钮；不配置时仍按原来的「在同一条消息里直接找签到按钮」逻辑，找不到会报「账户错误」。
 
-**签到按钮文案每天变**（如 Ask Ash 的「今朝已至」会换成别的词，靠文本匹配永远追不上）：
+**签到按钮文案每天变**：
 
 ```toml
 [checkiner."templ_a<ashUniversal_Bot>"]
-name = "Ask Ash"
+name = "Ask"
 templ_panel_keywords = ["用户面板"]      # 先认出面板消息, 不然每条带按钮的消息都会去试
 bot_checkin_path = ["用户功能"]           # 进面板那一级
 bot_checkin_button_index = 8             # 面板里第 8 个按钮 (从左到右、从上到下, 1 起)
@@ -225,7 +225,7 @@ bot_checkin_button_index = 8             # 面板里第 8 个按钮 (从左到�
 
 ```toml
 [checkiner."templ_a<ashUniversal_Bot>"]
-name = "Ask Ash 面板签到"
+name = "Ask"
 bot_checkin_button_index = [2, 1]   # /start 面板上那个每天换词的按钮
 bot_checkin_button_repeat = 6       # 最多连点 6 次, 出现成功消息就提前结束
 bot_checkin_button_interval = 0.6   # 两次点击间隔 (秒), 默认 0.6
@@ -257,20 +257,20 @@ bot_checkin_button_interval = 0.6   # 两次点击间隔 (秒), 默认 0.6
 
 ```toml
 [checkiner.'templ_b<some_emby_group>']
-name = "某某群冒泡"
+name = "某某群"
 is_chat = true           # 尖括号里写群, 不是机器人
 bot_checkin_cmd = "签到"
 wait_response = false    # 发完直接记为成功并结束
 bot_use_captcha = false  # 群里图片多, 关掉 OCR
 ```
 
-`bot_checkin_cmd` 给列表时每次随机挑一个：`["签到", "打卡", "冒泡"]`。
+`bot_checkin_cmd` 给列表时每次随机挑一个：`["签到", "打卡"]`。
 
 本 fork 补的是另一条路径——**在群里跟机器人对话**（`chat_name`），它保留 `filters.user(机器人)`，只处理机器人的回复，群友的闲聊不会被当成签到结果；模板 A 也因此能在群里点按钮签到：
 
 ```toml
 [checkiner.'templ_b<SomeEmbyBot>']
-name = "某某群签到"
+name = "某某群"
 chat_name = "some_emby_group"             # 群的 @username, 或私有群数字 ID
 bot_checkin_cmd = "/checkin@SomeEmbyBot"  # 群里发命令必须带 @机器人名
 bot_success_keywords = ["签到成功"]
@@ -282,7 +282,7 @@ bot_success_keywords = ["签到成功"]
 
 已有内置群签到器可直接启用（都需显式加入白名单）：`pandatv_group`、`akile_group`、`bytevirt_group`、`epub_group`、`epub_group_chat`、`feiyuemusic_group_old`、`marmot_group_old`、`pornfans_group`、`pornfans_game_group`。其中 `pandatv_group` 属于默认启用范围，其余在 `__ignore__` 里。
 
-**MICU 股东会**已内置算术题处理：自动解析 `8 - 5 = ?`、在选项按钮里找等值项并点击，同时关掉了图片 OCR 和按钮 toast 解析。无需额外配置。
+**MICU**已内置算术题处理：自动解析 `8 - 5 = ?`、在选项按钮里找等值项并点击，同时关掉了图片 OCR 和按钮 toast 解析。无需额外配置。
 
 **机器人先出算术题/验证题**（其他站点）：这类提示常写成「签到成功，请回答 5+5=?」，直接按成功关键词判定就会漏答并误报成功。内置已覆盖「请回答 / 请计算 / 请输入答案 / 请选择正确答案 / 回答下列 / 请作答 / 请完成下面 / 这道题 / 答错 / 重新生成 / 补全诗句 / 依次点击」，并用算式正则兜底（含全角符号），命中后交给智能回答（`[llm]`），答完继续等待真正的成功消息。题目以「配图 + 文字按钮」形式发来的（如 `@niubi2233_bot` 的「防機器签到验证」）也不会再被当成验证码图片去 OCR。
 
