@@ -22,7 +22,7 @@
 
 | 问题 | 本 fork 的做法 |
 |---|---|
-| 应对的上游云端认证服务离线 | 验证码解析、考核问答、看图选按钮改用本地 LLM，不向第三方发送内容 |
+| 应对上游的云端认证服务离线 | 验证码解析、考核问答、看图选按钮改用本地 LLM，不向第三方发送内容 |
 | 自建 / 反代 / CDN 的 Emby 站点保活失败 | 补齐畸形站点适配：分块限流、错误码 520–525、租约恢复、CDN 取流、进度降级 |
 | 网页签到站点缺失 | 补上纯网页签到（不依赖 Telegram 机器人） |
 
@@ -86,7 +86,7 @@ skip_auth = true
 
 `skip_auth = true` 时 `[llm]` 段必填，否则考核问答、看图选按钮、图片验证码全部无解。
 
-**几十个保活账号不必每个都写一遍客户端信息**：`device` / `client` / `client_version` / `useragent` / `device_id` 可以在 `[emby]` 段统一配置，账号未单独指定时自动继承；账号里写了的那一项优先级更高（例如个别账号要 `device = "Pixel 7 Pro"`）：
+**客户端信息全局**：`device` / `client` / `client_version` / `useragent` / `device_id` 可以在 `[emby]` 段统一配置，账号未单独指定时自动继承；账号里写了的那一项优先级更高（例如个别账号要 `device = "Pixel 7 Pro"`）：
 
 ```toml
 [emby]
@@ -128,7 +128,15 @@ device = "Pixel 7 Pro"   # 只覆盖这一项, 其余仍继承全局
 | **按钮定位** | 只按文本包含匹配，文案一变就报「账户错误」 | 新增 `bot_checkin_button_index`（按位置）与 `bot_checkin_button_pat`（按正则），失败时打印带序号的面板按钮；`bot_checkin_button_repeat` + `bot_checkin_button_interval` 支持按间隔连点直到成功 |
 | **结果关键词** | 只做子串匹配 | 支持 `re:` 前缀写正则，应对每次随机生成的吉祥话回执 |
 
-合并来源与逐项取舍见 [FORK.md](FORK.md)：[aprpure](https://github.com/aprpure/emby-keeper)（基底，本地 LLM 与 `skip_auth`）、[supermoon0201](https://github.com/supermoon0201/emby-keeper)（Emby 畸形站点适配）、[Elykia093](https://github.com/Elykia093/emby-keeper)（网页签到器）、[ignimutos](https://github.com/ignimutos/emby-keeper)（调度与校验器修复）。
+合并来源与逐项取舍见 [FORK.md](FORK.md)：
+
+[aprpure](https://github.com/aprpure/emby-keeper)：基底，本地 LLM 与 `skip_auth`
+
+[supermoon0201](https://github.com/supermoon0201/emby-keeper)：Emby 畸形站点适配
+
+[Elykia093](https://github.com/Elykia093/emby-keeper)：网页签到器
+
+[ignimutos](https://github.com/ignimutos/emby-keeper)：调度与校验器修复
 
 ---
 
