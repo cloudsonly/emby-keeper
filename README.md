@@ -37,8 +37,7 @@
 **首次运行**（交互式，按提示输入手机验证码）：
 
 ```bash
-docker run -v $(pwd)/app:/app --rm -it --net=host \
-  ghcr.io/cloudsonly/emby-keeper:latest -i
+docker run -v $(pwd)/app:/app --rm -it --net=host ghcr.io/cloudsonly/emby-keeper:latest -i
 ```
 
 `-i` 表示启动后立刻执行一次任务；`--net=host` 仅在 Linux 生效，其他平台去掉即可。
