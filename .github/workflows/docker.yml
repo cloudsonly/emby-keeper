@@ -58,7 +58,11 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          # 只认 GITHUB_TOKEN. 过去是 "GHCR_TOKEN || GITHUB_TOKEN", 但 GHCR_TOKEN 是
+          # 手工维护的 PAT, 过期后 docker login 会在 GET /v2/ 上直接返回
+          # "denied: denied", 整个构建在第一步就挂掉, 报错完全看不出是 token 过期.
+          # 工作流已声明 permissions.packages: write, GITHUB_TOKEN 足够用.
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -123,7 +127,11 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          # 只认 GITHUB_TOKEN. 过去是 "GHCR_TOKEN || GITHUB_TOKEN", 但 GHCR_TOKEN 是
+          # 手工维护的 PAT, 过期后 docker login 会在 GET /v2/ 上直接返回
+          # "denied: denied", 整个构建在第一步就挂掉, 报错完全看不出是 token 过期.
+          # 工作流已声明 permissions.packages: write, GITHUB_TOKEN 足够用.
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
