@@ -163,6 +163,19 @@ IN_PROGRESS_PATTERN = re.compile(
     r"签到中|正在签到|签到处理中|正在处理|处理中|排队中|正在查询|正在统计|请稍候|请稍等|请耐心等待"
 )
 
+# 图片验证题的题面: "请在 30 秒内点击图中事物的按钮以完成签到 / 每天只有一次机会,
+# 失败或者过期当天不可重试". 这种说明里带 "完成" 又带 "失败", 会被 is_result_text
+# 判成签到结果, 于是图片被当成普通配图, 验证码一次都没答就直接 retry ——
+# 终点站每天只有一次机会, 一次空转就把当天机会烧掉了.
+# 必须收得够窄: "请依次点击下方按钮补全诗句" 这类纯文字题面也含 "点击下方",
+# 一旦误判成验证码题, 诗句补全就会被当成图片题而永远等不到图.
+CAPTCHA_INSTRUCTION_PATTERN = re.compile(
+    r"点击(?:图中|上图|图片中|图中的)"
+    r"|图中(?:事物|物体|内容)"
+    r"|请在.{0,6}秒内.{0,12}点击"
+    r"|点击.{0,12}以完成签到"
+)
+
 
 def count_poem_blanks(text: str) -> int:
     """数诗句里被挖空的位置数, 用来要求模型输出同样数量的点击.
@@ -643,10 +656,27 @@ class BotCheckin(BaseBotCheckin):
                 return True
         return False
 
+    def is_captcha_instruction(self, text: str) -> bool:
+        """判断是否为图片验证题的题面 (而不是签到结果).
+
+        "点击图中事物的按钮以完成签到" 这类说明里带 "完成", 后面还常跟一句
+        "失败或者过期当天不可重试", 于是同时命中成功与失败关键词. 若按结果处理,
+        不是误判成功就是立刻 retry, 两种都会让验证码根本没被作答.
+        """
+        if not text:
+            return False
+        return bool(CAPTCHA_INSTRUCTION_PATTERN.search(unicodedata.normalize("NFKC", text)))
+
     def message_type(self, message: Message):
         """分析传入消息的类型为验证码或文字."""
         if message.photo:
             if message.caption:
+                # 先认"图片验证题"的题面. 它常同时含 "完成" 与 "失败" (如终点站的
+                # "点击图中事物的按钮以完成签到, 每天只有一次机会, 失败或过期当天不可重试"),
+                # 会被下面的 is_result_text 判成签到结果, 图片于是被当成普通配图,
+                # 验证码一次都没答就 retry, 白白烧掉当天唯一一次机会.
+                if self.bot_use_captcha and self.is_captcha_instruction(message.caption):
+                    return MessageType.CAPTCHA
                 # 图片只是配图, 真正的验证在文字和按钮里 (如 "防機器签到验证: 请依次点击下方
                 # 按钮补全诗句"). 这类消息当验证码 OCR 只会识别失败并反复重试.
                 if self.is_challenge_text(message.caption):
@@ -807,6 +837,11 @@ class BotCheckin(BaseBotCheckin):
                 await self.on_text(None, pending)
         elif self.is_challenge_incomplete(text) and await self.on_challenge_incomplete(message, text):
             # 机器人提示 "空位没补全 / 至少要按顺序点两个按钮", 题目还在, 重答一次.
+            return
+        elif self.is_captcha_instruction(text):
+            # 图片验证题的题面 ("点击图中事物的按钮以完成签到…失败或过期当天不可重试").
+            # 它同时含 "完成" 和 "失败", 按结果处理会误判成功或立刻 retry, 都等于没答验证码.
+            self.log.debug(f"识别到图片验证题面, 继续等待验证图片: {truncate_str(text, 40)}")
             return
         elif keyword_match(
             text, to_iterable(self.bot_account_fail_keywords) or default_keywords["account_fail"]

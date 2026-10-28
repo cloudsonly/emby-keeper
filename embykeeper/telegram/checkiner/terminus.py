@@ -40,7 +40,17 @@ class TerminusCheckin(AnswerBotCheckin):
             else:
                 self.log.warning(f"签到失败: 验证码识别错误.")
                 return await self.fail()
-            result = options[options_cleaned.index(result)]
+            # 模型可能回 "鸟" 也可能回 "答案是鸟", 精确匹配不上就退化成包含匹配,
+            # 直接 options_cleaned.index() 抛 ValueError 会让整次签到炸掉.
+            index = None
+            if result in options_cleaned:
+                index = options_cleaned.index(result)
+            else:
+                index = next((i for i, o in enumerate(options_cleaned) if o in result), None)
+            if index is None:
+                self.log.warning(f"签到失败: 视觉答案 [{result}] 不在选项 {options_cleaned} 中.")
+                return await self.fail()
+            result = options[index]
             await asyncio.sleep(random.uniform(0.5, 1.5))
             try:
                 await message.click(result)
