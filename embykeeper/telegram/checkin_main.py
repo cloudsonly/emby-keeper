@@ -678,10 +678,10 @@ class CheckinerManager:
         ignored = []
         successful = []
         checked = []
-        # 先失败过、重试后才落成 "已签到而跳过" 的站点.
-        # 这些站点在日志里明显失败过, 但最终状态是 NONEED, 汇总里只剩一个计数,
-        # 推送里连名字都不出现, 用户根本无从发现 —— 例如终点站的验证码题面被误判成
-        # 失败后 retry, 重试时机器人回 "今日已经签到过了".
+        # 首次尝试没成功、最终却落成 "已签到而跳过" 的站点 (重试后看到已签到, 或
+        # fail 之后又被 NONEED 覆盖). 这类站点在日志里明显失败过, 但最终状态是
+        # NONEED, 汇总里只剩一个计数, 推送里连名字都不出现, 用户根本无从发现 ——
+        # 例如终点站的验证码题面被误判成失败后 retry, 重试时机器人回 "今日已经签到过了".
         retried_checked = []
 
         for checkiner, result in results.values():
@@ -713,7 +713,7 @@ class CheckinerManager:
             log.bind(log=True).info(f"签到成功 ({spec}).")
         if retried_checked:
             log.bind(log=True).warning(
-                f"以下站点首次尝试失败, 重试后判定已签到 (不计入失败): {', '.join(retried_checked)}"
+                f"以下站点首次尝试未成功, 最终判定为已签到 (未计入失败): {', '.join(retried_checked)}"
             )
 
     def schedule_site(

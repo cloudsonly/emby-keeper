@@ -76,7 +76,7 @@ def test_retried_then_noneed_is_named_separately():
     warnings = log.level_of("warning")
     assert len(warnings) == 1
     assert "终点站" in warnings[0]
-    assert "重试后判定已签到" in warnings[0]
+    assert "首次尝试未成功" in warnings[0]
 
 
 def test_plain_noneed_is_not_named():
@@ -89,7 +89,7 @@ def test_plain_noneed_is_not_named():
     )
 
     assert log.level_of("warning") == []
-    assert "重试后判定已签到" not in log.text()
+    assert "首次尝试未成功" not in log.text()
 
 
 def test_retried_checkiner_is_still_reported_alongside_failures():
