@@ -183,6 +183,18 @@ def _install_test_stubs():
     sys.modules["embykeeper.telegram.session"] = session_module
 
 
+_STUB_MODULES = (
+    "loguru",
+    "embykeeper.runinfo",
+    "embykeeper.schema",
+    "embykeeper.config",
+    "embykeeper.telegram.pyrogram",
+    "embykeeper.telegram.embyboss",
+    "embykeeper.telegram.link",
+    "embykeeper.telegram.session",
+)
+_original_modules = {name: sys.modules.get(name) for name in _STUB_MODULES}
+
 _install_test_stubs()
 
 from embykeeper.runinfo import RunStatus
@@ -192,6 +204,18 @@ base_module = importlib.import_module("embykeeper.telegram.registrar._base")
 
 RegisterManager = registrar_main_module.RegisterManager
 BaseBotRegister = base_module.BaseBotRegister
+
+# 恢复被替换的模块, 避免污染后续测试模块的收集.
+# 不恢复的话, 排在后面的测试一旦 import embykeeper.telegram.session 或 embykeeper.config,
+# 拿到的是这里的桩模块 (没有 __file__, 也没有真实属性), 表现为
+#   ImportError: cannot import name 'xxx' from 'embykeeper.telegram.session' (unknown location)
+# 已经导入的 registrar_main_module / base_module 仍然持有桩对象的引用, 不受影响.
+for _name in _STUB_MODULES:
+    _original = _original_modules.get(_name)
+    if _original is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _original
 
 
 class FakeRegistrarConfig:

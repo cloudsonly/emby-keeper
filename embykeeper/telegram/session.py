@@ -44,6 +44,49 @@ API_ID = _decode(_id)
 API_HASH = _decode(_hash)
 
 
+async def _noop_session_restart(*args, **kwargs):
+    logger.debug("账号正在关闭, 忽略 pyrogram 的自动重连请求.")
+
+
+async def _noop_session_start(*args, **kwargs):
+    logger.debug("账号正在关闭, 忽略 pyrogram 的自动重连请求.")
+
+
+def _freeze_session(client) -> None:
+    """关闭账号前, 冻结 pyrogram 的自动重连.
+
+    Session.start() 遇到 OSError/RPCError 时不抛出, 而是
+
+        self.client.loop.create_task(self.restart())
+
+    起一个没人 await、也没有句柄的游离任务. restart() 内部是 stop() + start(), 而
+    start() 第一件事就是读 storage.api_id(); 此时 clean() 里已经 await client.stop()
+    (disconnect 会 storage.close()), 于是那个游离任务抛出
+
+        sqlite3.ProgrammingError: Cannot operate on a closed database
+
+    并以 "Task exception was never retrieved" 的形式在收尾阶段打一整段 traceback.
+    它既不影响签到结果, 也没有句柄可以取消, 只能让它一开始就不做事.
+
+    注意 restart 也要换: 游离任务执行时才按名字查找方法, 所以即使任务在冻结之前就被
+    创建 (那时抓到的是原始 bound method), 它内部的 self.start() 仍会命中这里换上的
+    空实现.
+    """
+    sessions = []
+    current = getattr(client, "session", None)
+    if current is not None:
+        sessions.append(current)
+    for session in (getattr(client, "sessions", None) or {}).values():
+        if all(session is not s for s in sessions):
+            sessions.append(session)
+    for session in sessions:
+        try:
+            session.restart = _noop_session_restart
+            session.start = _noop_session_start
+        except Exception:
+            logger.debug("无法冻结会话的自动重连, 忽略.")
+
+
 class ClientsSession:
     pool = {}
     lock = asyncio.Lock()
@@ -105,6 +148,9 @@ class ClientsSession:
                         logger.debug("账号的退出处理程序执行完成, 开始清理监听.")
                 else:
                     logger.debug("未注册退出处理程序, 开始清理监听.")
+                # 必须在 stop() 之前冻结: disconnect() 会 storage.close(), 之后任何被
+                # pyrogram 排进事件循环的重连任务都会撞上已关闭的数据库.
+                _freeze_session(client)
                 await client.stop()
                 await client.storage.delete()
                 logger.debug(f'已停止账号 "{phone_masked}" 的监听和任务.')
@@ -395,6 +441,7 @@ class ClientsSession:
                         await client.start()
                     except asyncio.TimeoutError:
                         try:
+                            _freeze_session(client)
                             await client.stop()
                         except Exception:
                             pass
